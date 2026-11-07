@@ -110,7 +110,7 @@ async function tick() {
 
 export function startWorker() {
   if (!aiConfigured()) {
-    console.warn('[worker] ANTHROPIC_API_KEY absent : les documents resteront en attente.');
+    console.warn('[worker] Aucune clé d\'IA (GEMINI_API_KEY ou ANTHROPIC_API_KEY) : les documents resteront en attente.');
   }
   timer = setInterval(tick, POLL_MS);
   tick();

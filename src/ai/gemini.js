@@ -24,6 +24,7 @@ async function call(model, body) {
   if (!res.ok) {
     const msg = data?.error?.message || `HTTP ${res.status}`;
     if (res.status === 429) throw new GeminiError(`Quota Gemini atteint (${msg.slice(0, 160)})`, 429);
+    if (res.status === 503) throw new GeminiError(`Gemini surchargé (${model}) : nouvel essai automatique.`, 503);
     throw new GeminiError(`Gemini : ${msg.slice(0, 300)}`, res.status);
   }
   return data;
@@ -57,7 +58,31 @@ function parseJson(text) {
  * @param {string} userText
  * @param {object} schema  JSON Schema imposé à la réponse
  */
+// Modèles essayés à la suite quand le précédent est surchargé (503), à court de quota
+// (429) ou inconnu (404). GEMINI_FALLBACK_MODELS permet de changer la liste.
+export const GEMINI_FALLBACKS = (process.env.GEMINI_FALLBACK_MODELS ?? 'gemini-flash-latest,gemini-2.5-flash-lite,gemini-2.5-flash')
+  .split(',')
+  .map((m) => m.trim())
+  .filter((m) => m && m !== GEMINI_MODEL);
+
+const SWITCH_MODEL = new Set([404, 429, 500, 503]);
+
 export async function extractWithGemini(system, pages, userText, schema) {
+  let lastErr;
+  for (const model of [GEMINI_MODEL, ...GEMINI_FALLBACKS]) {
+    try {
+      return await extractWithModel(model, system, pages, userText, schema);
+    } catch (err) {
+      if (!(err instanceof GeminiError) || !SWITCH_MODEL.has(err.status)) throw err;
+      console.warn(`[gemini] ${model} indisponible (${err.status}), essai du modèle suivant`);
+      // Un modèle inconnu (404) ne doit pas masquer une vraie surcharge vue avant.
+      if (!lastErr || err.status !== 404) lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+async function extractWithModel(model, system, pages, userText, schema) {
   const parts = pages.map((p) => ({ inline_data: { mime_type: p.mime, data: p.data.toString('base64') } }));
   const base = {
     systemInstruction: { parts: [{ text: system }] },
@@ -65,7 +90,7 @@ export async function extractWithGemini(system, pages, userText, schema) {
   };
 
   try {
-    const data = await call(GEMINI_MODEL, {
+    const data = await call(model, {
       ...base,
       contents: [{ role: 'user', parts: [...parts, { text: userText }] }],
       generationConfig: { ...base.generationConfig, responseJsonSchema: schema },
@@ -75,7 +100,7 @@ export async function extractWithGemini(system, pages, userText, schema) {
     // Certains modèles n'acceptent pas le schéma JSON complet : on le donne alors dans la consigne.
     if (!(err instanceof GeminiError) || err.status !== 400 || !/schema/i.test(err.message)) throw err;
   }
-  const data = await call(GEMINI_MODEL, {
+  const data = await call(model, {
     ...base,
     contents: [
       {
