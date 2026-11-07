@@ -297,7 +297,9 @@ function documentsTable(documents) {
     <tbody>${documents.map((d) => `
       <tr class="clickable" data-doc="${d.id}">
         <td class="small">${fmtDateTime(d.created_at)}<br><span class="muted">${d.source === 'mobile' ? '📱 téléphone' : '💻 web'}</span></td>
-        <td>${esc(d.summary || d.original_name)}${d.error ? `<div class="small" style="color:var(--danger)">${esc(d.error)}</div>` : ''}</td>
+        <td>${esc(d.summary || d.original_name)}${d.error ? (d.status === 'pending'
+          ? `<div class="small muted">⏳ Nouvel essai automatique dans quelques minutes (${esc(d.error)})</div>`
+          : `<div class="small" style="color:var(--danger)">${esc(d.error)}</div>`) : ''}</td>
         <td class="small">${esc(DOC_TYPE_LABELS[d.doc_type] || (d.status === 'pending' || d.status === 'processing' ? '…' : ''))}</td>
         <td>${badge(d.status)}</td>
       </tr>`).join('')}</tbody></table></div>`;
@@ -356,7 +358,7 @@ async function viewDocument(id) {
       <div class="card preview">${preview}</div>
       <div>
         ${doc.status === 'pending' || doc.status === 'processing' ? '<div class="alert info">L\'IA lit ce document… la page se met à jour toute seule.</div>' : ''}
-        ${doc.error ? `<div class="alert error">${esc(doc.error)}</div>` : ''}
+        ${doc.error ? `<div class="alert ${doc.status === 'pending' ? 'info' : 'error'}">${doc.status === 'pending' ? '⏳ Nouvel essai automatique dans quelques minutes : ' : ''}${esc(doc.error)}</div>` : ''}
         ${notes.map((n) => `<div class="alert info">${esc(n)}</div>`).join('')}
         ${warnings.length ? `<div class="alert warn"><b>Points à vérifier</b><ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}
         ${doc.extracted ? `<div class="card" style="margin-bottom:14px">

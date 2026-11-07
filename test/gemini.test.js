@@ -36,6 +36,24 @@ test('schéma refusé : nouvel essai avec le schéma dans la consigne', async ()
 });
 
 test('quota dépassé : erreur 429', async () => {
-  stubFetch([{ status: 429, body: { error: { message: 'Resource exhausted' } } }]);
+  const q = () => ({ status: 429, body: { error: { message: 'Resource exhausted' } } });
+  stubFetch([q(), q(), q(), q()]);
   await assert.rejects(extractWithGemini('sys', pages, 'texte', schema), (e) => e instanceof GeminiError && e.status === 429);
+});
+
+test('modèle surchargé (503) : bascule sur le modèle suivant', async () => {
+  const calls = stubFetch([{ status: 503, body: { error: { message: 'high demand' } } }, ok({ doc_type: 'facture_vente' })]);
+  const r = await extractWithGemini('sys', pages, 'texte', schema);
+  assert.equal(r.doc_type, 'facture_vente');
+  assert.notEqual(calls[0].url, calls[1].url);
+});
+
+test('tous les modèles indisponibles : erreur réessayable conservée', async () => {
+  stubFetch([
+    { status: 503, body: { error: { message: 'high demand' } } },
+    { status: 404, body: { error: { message: 'not found' } } },
+    { status: 404, body: { error: { message: 'not found' } } },
+    { status: 404, body: { error: { message: 'not found' } } },
+  ]);
+  await assert.rejects(extractWithGemini('sys', pages, 'texte', schema), (e) => e.status === 503);
 });
