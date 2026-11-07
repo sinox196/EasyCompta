@@ -129,6 +129,17 @@ documentsRouter.get('/companies/:companyId/documents', loadCompany, async (req, 
   res.json({ documents: rows, ai_ready: aiConfigured() });
 });
 
+// Relance d'un coup tous les documents en erreur d'une société.
+documentsRouter.post('/companies/:companyId/documents/retry-errors', loadCompany, async (req, res) => {
+  const { rowCount } = await query(
+    `UPDATE documents SET status = 'pending', attempts = 0, error = NULL, retry_after = NULL
+      WHERE company_id = $1 AND status = 'error'`,
+    [req.company.id]
+  );
+  kickWorker();
+  res.json({ count: rowCount });
+});
+
 async function loadDocument(req, res, next) {
   const { rows } = await query(
     `SELECT d.* FROM documents d JOIN companies c ON c.id = d.company_id
@@ -179,7 +190,7 @@ documentsRouter.post('/documents/:id/reprocess', loadDocument, async (req, res) 
   const hint = ['facture_achat', 'facture_vente', 'releve_bancaire', 'auto'].includes(req.body?.type_hint)
     ? req.body.type_hint
     : req.doc.type_hint;
-  await query(`UPDATE documents SET status = 'pending', attempts = 0, error = NULL, type_hint = $2 WHERE id = $1`, [
+  await query(`UPDATE documents SET status = 'pending', attempts = 0, error = NULL, retry_after = NULL, type_hint = $2 WHERE id = $1`, [
     req.doc.id,
     hint,
   ]);
