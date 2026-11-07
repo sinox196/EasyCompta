@@ -9,7 +9,9 @@ import { fromMillimes } from './accounting/money.js';
 
 const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY || 2);
 const POLL_MS = Number(process.env.WORKER_POLL_MS || 3000);
-const MAX_ATTEMPTS = 3;
+// Un quota dépassé (429) est réessayé plus longtemps : le quota gratuit Gemini se
+// recharge à la minute ou au jour.
+const MAX_ATTEMPTS = 6;
 
 let running = 0;
 let timer = null;
@@ -18,7 +20,7 @@ async function claimNext() {
   const { rows } = await query(
     `UPDATE documents SET status = 'processing', attempts = attempts + 1, started_at = now(), error = NULL
       WHERE id = (
-        SELECT id FROM documents WHERE status = 'pending'
+        SELECT id FROM documents WHERE status = 'pending' AND (retry_after IS NULL OR retry_after <= now())
          ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
       RETURNING *`
   );
@@ -78,12 +80,14 @@ async function runOne(doc) {
     console.log(`[worker] document ${doc.id} traité`);
   } catch (err) {
     const retry = isRetryable(err) && doc.attempts < MAX_ATTEMPTS;
-    console.error(`[worker] document ${doc.id} : ${err.message}${retry ? ' (nouvel essai)' : ''}`);
-    await query(`UPDATE documents SET status = $2, error = $3 WHERE id = $1`, [
-      doc.id,
-      retry ? 'pending' : 'error',
-      String(err.message || err).slice(0, 500),
-    ]);
+    // Attente croissante : 1, 2, 4, 8, 16 minutes.
+    const waitMin = 2 ** (doc.attempts - 1);
+    console.error(`[worker] document ${doc.id} : ${err.message}${retry ? ` (nouvel essai dans ${waitMin} min)` : ''}`);
+    await query(
+      `UPDATE documents SET status = $2, error = $3, retry_after = CASE WHEN $2 = 'pending' THEN now() + make_interval(mins => $4::int) END
+        WHERE id = $1`,
+      [doc.id, retry ? 'pending' : 'error', String(err.message || err).slice(0, 500), waitMin]
+    );
   }
 }
 

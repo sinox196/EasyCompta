@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { EXPENSE_CATEGORIES, BANK_CATEGORIES } from '../accounting/plan-comptable.js';
+import { extractWithGemini, GeminiError, GEMINI_MODEL } from './gemini.js';
 
 const MODEL = process.env.AI_MODEL || 'claude-opus-5-5';
 const EFFORT = process.env.AI_EFFORT || 'medium';
@@ -11,8 +12,19 @@ function getClient() {
   return client;
 }
 
+// Fournisseur d'IA : "claude" (API Anthropic) ou "gemini" (Google, quota gratuit).
+// Par défaut : Gemini si GEMINI_API_KEY est défini, sinon Claude.
+export const PROVIDER = (process.env.AI_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : 'claude')).toLowerCase();
+
 export function aiConfigured() {
-  return Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || process.env.AI_MOCK === '1');
+  if (process.env.AI_MOCK === '1') return true;
+  if (PROVIDER === 'gemini') return Boolean(process.env.GEMINI_API_KEY);
+  return Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+}
+
+export function aiDescription() {
+  if (process.env.AI_MOCK === '1') return 'démo';
+  return PROVIDER === 'gemini' ? `gemini:${GEMINI_MODEL}` : `claude:${MODEL}`;
 }
 
 const str = { type: 'string' };
@@ -131,20 +143,19 @@ const HINTS = {
 export async function extractDocument(company, pages, typeHint = 'auto') {
   if (process.env.AI_MOCK === '1') return mockExtraction(typeHint);
 
+  const userText = [`Document de ${pages.length} page(s). Extrais les données selon le schéma.`, HINTS[typeHint] || '']
+    .filter(Boolean)
+    .join('\n');
+  if (PROVIDER === 'gemini') {
+    return extractWithGemini(buildSystemPrompt(company), pages, userText, EXTRACTION_SCHEMA);
+  }
+
   const content = pages.map((p) =>
     p.mime === 'application/pdf'
       ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: p.data.toString('base64') } }
       : { type: 'image', source: { type: 'base64', media_type: p.mime, data: p.data.toString('base64') } }
   );
-  content.push({
-    type: 'text',
-    text: [
-      `Document de ${pages.length} page(s). Extrais les données selon le schéma.`,
-      HINTS[typeHint] || '',
-    ]
-      .filter(Boolean)
-      .join('\n'),
-  });
+  content.push({ type: 'text', text: userText });
 
   const params = {
     model: MODEL,
@@ -183,6 +194,8 @@ export class PermanentError extends Error {}
 
 export function isRetryable(err) {
   if (err instanceof PermanentError) return false;
+  if (err instanceof GeminiError) return err.status === 429 || err.status >= 500;
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError' || err instanceof TypeError) return true;
   if (err instanceof Anthropic.RateLimitError) return true;
   if (err instanceof Anthropic.APIConnectionError) return true;
   if (err instanceof Anthropic.InternalServerError) return true;

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { migrate, query } from './db.js';
 import { startWorker } from './worker.js';
-import { aiConfigured } from './ai/extract.js';
+import { aiConfigured, aiDescription } from './ai/extract.js';
 import { authRouter } from './routes/auth.js';
 import { documentsRouter } from './routes/documents.js';
 import { entriesRouter } from './routes/entries.js';
@@ -21,7 +21,7 @@ app.use(cookieParser());
 app.get('/api/health', async (req, res) => {
   try {
     await query('SELECT 1');
-    res.json({ ok: true, ai: aiConfigured() });
+    res.json({ ok: true, ai: aiConfigured(), provider: aiDescription() });
   } catch (err) {
     res.status(503).json({ ok: false, error: 'database' });
   }

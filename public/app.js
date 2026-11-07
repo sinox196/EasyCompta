@@ -184,7 +184,7 @@ async function viewDashboard() {
   const inQueue = (d.pending || 0) + (d.processing || 0);
   main().innerHTML = `
     <div class="page-head"><h1>${esc(c.name)}</h1><span class="muted">Exercice ${new Date().getFullYear()}</span></div>
-    ${ai_ready ? '' : '<div class="alert warn">L\'IA n\'est pas encore configurée sur le serveur (variable <b>ANTHROPIC_API_KEY</b>). Les documents restent en attente.</div>'}
+    ${ai_ready ? '' : '<div class="alert warn">L\'IA n\'est pas encore configurée sur le serveur (variable <b>GEMINI_API_KEY</b> ou <b>ANTHROPIC_API_KEY</b>). Les documents restent en attente.</div>'}
     <div class="kpis">
       <div class="card kpi"><div class="label">En cours de lecture</div><div class="value">${inQueue}</div></div>
       <div class="card kpi"><div class="label">À vérifier</div><div class="value" style="color:var(--warn)">${d.review || 0}</div></div>
@@ -316,12 +316,18 @@ async function viewDocuments() {
     <div class="page-head"><h1>Documents</h1></div>
     ${uploadCard()}
     <div class="card" style="margin-top:16px">
-      <div class="row" style="margin-bottom:10px">${filters.map(([v, l]) => `<button class="${docFilter === v ? 'primary' : ''}" data-filter="${v}">${l}</button>`).join('')}</div>
+      <div class="row" style="margin-bottom:10px">${filters.map(([v, l]) => `<button class="${docFilter === v ? 'primary' : ''}" data-filter="${v}">${l}</button>`).join('')}
+        ${documents.some((d) => d.status === 'error') ? '<span class="spacer"></span><button id="retry-errors">↻ Relancer les documents en erreur</button>' : ''}</div>
       ${documentsTable(documents)}
     </div>`;
   main().querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => { docFilter = b.dataset.filter; viewDocuments(); }));
   bindUpload(() => viewDocuments());
   bindDocRows();
+  main().querySelector('#retry-errors')?.addEventListener('click', async () => {
+    const { count } = await api(`/companies/${c.id}/documents/retry-errors`, { method: 'POST' });
+    toast(`${count} document(s) renvoyé(s) à l'IA`);
+    viewDocuments();
+  });
   if (documents.some((d) => d.status === 'pending' || d.status === 'processing')) {
     pollTimer = setInterval(() => softRefresh(viewDocuments), 4000);
   }

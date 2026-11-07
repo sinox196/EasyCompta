@@ -130,6 +130,9 @@ const MIGRATIONS = [
    )`,
 ];
 
+// Colonnes ajoutées après la première version (idempotent).
+MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ`);
+
 export async function migrate() {
   for (const sql of MIGRATIONS) {
     await pool.query(sql);
