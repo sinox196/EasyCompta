@@ -84,7 +84,8 @@ const NAV = [
   ['documents', 'Documents'],
   ['journal', 'Écritures'],
   ['balance', 'Balance & grand livre'],
-  ['tva', 'TVA mensuelle'],
+  ['declaration', 'Déclaration fiscale'],
+  ['tva', 'TVA de l\'année'],
   ['telephone', 'Connecter mon téléphone'],
   ['dossiers', 'Sociétés'],
   ['aide', 'Comment ça marche ?'],
@@ -148,7 +149,7 @@ async function route() {
   const [page = 'dashboard', arg] = location.hash.replace(/^#\/?/, '').split('/');
   renderSidebar();
   if (!state.companyId && !['dossiers', 'aide'].includes(page)) return viewNoCompany();
-  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, telephone: viewPhone, dossiers: viewCompanies, aide: viewHelp };
+  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, telephone: viewPhone, dossiers: viewCompanies, aide: viewHelp };
   try {
     await (views[page] || viewDashboard)();
   } catch (err) {
@@ -640,6 +641,74 @@ async function viewTva() {
   main().querySelector('#tva-year').addEventListener('change', (e) => { tvaYear = Number(e.target.value); viewTva(); });
 }
 
+// --- Déclaration mensuelle -----------------------------------------------------
+
+function previousMonth() {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+let declMonth = previousMonth();
+
+async function viewDeclaration() {
+  const c = company();
+  const d = await api(`/companies/${c.id}/declaration?month=${declMonth}`);
+  const monthLabel = new Date(`${d.month}-01T00:00:00`).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+  const late = new Date(`${d.deadline}T23:59:59`) < new Date();
+  main().innerHTML = `
+    <div class="page-head no-print"><h1>Déclaration fiscale mensuelle</h1>
+      <input type="month" id="decl-month" value="${d.month}" style="width:auto">
+      <span class="spacer"></span><button id="print">🖨 Imprimer / PDF</button></div>
+    <div class="alert info no-print">Chaque mois, la société déclare et paie les impôts du mois précédent : la TVA, les retenues à la source, le droit de timbre, le FODEC et la TCL. Pour une société, la date limite est le <b>28 du mois suivant</b> (le 15 pour une personne physique). EasyCompta prépare les montants à partir des documents scannés. Vous les reportez ensuite sur le portail de déclaration en ligne du ministère des Finances, ou vous les transmettez à votre comptable.</div>
+    ${d.drafts ? `<div class="alert warn no-print">${d.drafts} écriture(s) de ce mois sont encore « À vérifier » : validez-les avant de déclarer. <a href="#/documents">Voir les documents</a></div>` : ''}
+    ${d.sales_documents === 0 && Number(d.chiffreAffairesHt) > 0 ? '<div class="alert warn no-print">Des ventes ont été saisies sans facture scannée : le timbre et le FODEC collectés ne sont peut-être pas complets.</div>' : ''}
+    <div class="card">
+      <div class="row" style="align-items:flex-start">
+        <div>
+          <h2 style="margin-bottom:4px">Déclaration mensuelle — ${esc(monthLabel)}</h2>
+          <div>${esc(d.company.name)}${d.company.matricule_fiscal ? ` — MF ${esc(d.company.matricule_fiscal)}` : ' — <span class="muted">matricule fiscal à renseigner dans Sociétés</span>'}</div>
+        </div>
+        <span class="spacer"></span>
+        <div style="text-align:right">
+          <div class="muted small">Date limite de dépôt</div>
+          <div style="font-weight:700;color:${late ? 'var(--danger)' : 'inherit'}">${fmtDate(d.deadline)}${late ? ' (dépassée)' : ''}</div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:18px">1. TVA</h3>
+      <div class="table-wrap"><table>
+        <tbody>
+          <tr><td>Chiffre d'affaires HT du mois</td><td class="num">${money(d.chiffreAffairesHt)}</td></tr>
+          <tr><td>TVA collectée sur les ventes</td><td class="num">${money(d.tva.collectee)}</td></tr>
+          <tr><td>− TVA déductible sur les achats</td><td class="num">${money(d.tva.deductible)}</td></tr>
+          <tr><td>− Crédit de TVA du mois précédent</td><td class="num">${money(d.tva.creditReporte)}</td></tr>
+          <tr><td><b>TVA à payer</b></td><td class="num"><b>${money(d.tva.aPayer)}</b></td></tr>
+          ${Number(d.tva.creditAReporter) ? `<tr><td>Crédit de TVA à reporter sur le mois suivant</td><td class="num">${money(d.tva.creditAReporter)}</td></tr>` : ''}
+        </tbody>
+      </table></div>
+
+      <h3 style="margin-top:18px">2. Récapitulatif à payer</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Impôt / taxe</th><th class="num">Base</th><th class="num">Montant (DT)</th></tr></thead>
+        <tbody>${d.lines.map((l) => `<tr><td>${esc(l.label)}</td><td class="num">${l.base === null ? '' : money(l.base)}</td><td class="num">${money(l.amount)}</td></tr>`).join('')}</tbody>
+        <tfoot><tr><td colspan="2">Total à payer</td><td class="num">${money(d.total)}</td></tr></tfoot>
+      </table></div>
+
+      ${d.withholding_detected.length ? `
+      <h3 style="margin-top:18px">3. Retenues à la source repérées sur les factures d'achat</h3>
+      <p class="small muted">Quand vous payez ces fournisseurs, vous devez retenir ces montants et les reverser à l'Etat. Ils comptent dans la ligne « Retenues à la source à reverser » seulement s'ils ont été passés en écriture au compte 432.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Fournisseur</th><th>Facture</th><th class="num">Retenue</th></tr></thead>
+        <tbody>${d.withholding_detected.map((r) => `<tr><td><a href="#/documents/${r.document_id}">${esc(r.supplier)}</a></td><td>${esc(r.number)}</td><td class="num">${money(r.amount)}</td></tr>`).join('')}</tbody>
+      </table></div>` : ''}
+
+      <p class="small muted" style="margin-top:16px">Ces montants sont indicatifs et calculés automatiquement à partir des écritures. Les charges sur salaires (retenues sur salaires, TFP, FOPROLOS) ne sont pas encore calculées. Faites vérifier la déclaration avant de la déposer.</p>
+    </div>`;
+  main().querySelector('#decl-month').addEventListener('change', (e) => { if (e.target.value) { declMonth = e.target.value; viewDeclaration(); } });
+  main().querySelector('#print').addEventListener('click', () => window.print());
+}
+
 // --- Téléphone -----------------------------------------------------------------
 
 async function viewPhone() {
@@ -725,7 +794,8 @@ function viewHelp() {
       <li><b>Écritures automatiques</b> : le logiciel crée les écritures selon le plan comptable tunisien, toujours équilibrées (total débit = total crédit).</li>
       <li><b>Contrôle</b> : si tout est cohérent, c'est <span class="badge done">Comptabilisé</span>. En cas de doute (photo floue, totaux qui ne collent pas…), le document passe <span class="badge review">À vérifier</span> avec l'explication.</li>
       <li><b>Apprentissage</b> : si vous corrigez le compte d'un fournisseur, EasyCompta le retient pour ses prochaines factures.</li>
-      <li><b>Export</b> : la balance, le grand livre, la TVA du mois et l'export Excel sont prêts pour l'expert-comptable ou la déclaration.</li>
+      <li><b>Déclaration fiscale</b> : chaque mois, EasyCompta prépare la déclaration (TVA, retenues à la source, timbre, FODEC, TCL) avec le total à payer et la date limite.</li>
+      <li><b>Export</b> : la balance, le grand livre et l'export Excel sont prêts pour l'expert-comptable.</li>
     </ol>
     <h2>Les exemples d'écritures</h2>
     <p><b>Facture d'achat</b> (ex. internet 1 000 HT + 190 TVA + 1 timbre = 1 191 TTC) :</p>
