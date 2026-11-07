@@ -15,7 +15,8 @@ On scanne une facture, un ticket ou un relevé bancaire avec le téléphone. L'I
   - Avoirs : écriture inversée
 - **Contrôles automatiques** : la cohérence HT + TVA + taxes = TTC, le rapprochement du solde initial, des mouvements et du solde final du relevé, la confiance de l'IA, la lisibilité, les factures en devise. Si un point est douteux, le document passe en **À vérifier** avec une explication. Sinon il est **Comptabilisé** directement.
 - **Apprentissage** : quand on corrige le compte d'un fournisseur, d'un client ou d'un libellé bancaire, EasyCompta le retient pour les prochains documents de ce tiers.
-- **États** : journal, balance, grand livre, synthèse de TVA mensuelle, export CSV (s'ouvre dans Excel).
+- **États** : journal, balance, grand livre, TVA de l'année, export CSV (s'ouvre dans Excel).
+- **Déclaration fiscale mensuelle** : TVA (avec crédit reporté), retenues à la source, droit de timbre, FODEC, TCL, total à payer et date limite, version imprimable (`src/accounting/declaration.js`). Les charges sur salaires ne sont pas encore calculées.
 - **Multi-sociétés** : un cabinet peut gérer plusieurs dossiers.
 - Une page **« Comment ça marche ? »** explique la comptabilité aux non-comptables.
 

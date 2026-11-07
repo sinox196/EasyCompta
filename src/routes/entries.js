@@ -4,6 +4,7 @@ import { requireAuth, loadCompany } from '../auth.js';
 import { entriesWithLines } from './documents.js';
 import { toMillimes, fromMillimes } from '../accounting/money.js';
 import { partnerKey } from '../accounting/entries.js';
+import { computeDeclaration } from '../accounting/declaration.js';
 import { ACCOUNTS, JOURNALS, DOC_TYPES, EXPENSE_CATEGORIES, BANK_CATEGORIES, accountLabel } from '../accounting/plan-comptable.js';
 
 export const entriesRouter = Router();
@@ -223,6 +224,86 @@ entriesRouter.get('/companies/:companyId/tva', loadCompany, async (req, res) => 
     [req.company.id, year]
   );
   res.json({ year, months: rows });
+});
+
+// Déclaration mensuelle des impôts (aide au dépôt, montants indicatifs).
+entriesRouter.get('/companies/:companyId/declaration', loadCompany, async (req, res) => {
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
+  const start = `${month}-01`;
+  const id = req.company.id;
+  const m = (v) => toMillimes(v);
+
+  const totals = `
+    COALESCE(sum(CASE WHEN l.account LIKE '4367%' THEN l.credit - l.debit END), 0) AS collectee,
+    COALESCE(sum(CASE WHEN l.account LIKE '4366%' THEN l.debit - l.credit END), 0) AS deductible`;
+  const [{ rows: cur }, { rows: hist }, { rows: sales }, { rows: rsDocs }, { rows: drafts }] = await Promise.all([
+    query(
+      `SELECT ${totals},
+              COALESCE(sum(CASE WHEN l.account LIKE '7%' THEN l.credit - l.debit END), 0) AS ca_ht,
+              COALESCE(sum(CASE WHEN l.account LIKE '432%' THEN l.credit - l.debit END), 0) AS rs
+         FROM entries e JOIN entry_lines l ON l.entry_id = e.id
+        WHERE e.company_id = $1 AND e.entry_date >= $2::date AND e.entry_date < ($2::date + interval '1 month')`,
+      [id, start]
+    ),
+    query(
+      `SELECT to_char(e.entry_date, 'YYYY-MM') AS month, ${totals}
+         FROM entries e JOIN entry_lines l ON l.entry_id = e.id
+        WHERE e.company_id = $1 AND e.entry_date < $2::date GROUP BY 1`,
+      [id, start]
+    ),
+    query(
+      `SELECT d.id, d.doc_type, d.extracted->'invoice'->>'number' AS number, d.extracted->'invoice'->>'customer_name' AS customer,
+              COALESCE((d.extracted->'invoice'->>'stamp_duty')::numeric, 0) AS stamp,
+              COALESCE((d.extracted->'invoice'->>'fodec')::numeric, 0) AS fodec
+         FROM documents d
+        WHERE d.company_id = $1 AND d.doc_type IN ('facture_vente', 'avoir_vente') AND d.status IN ('done', 'review')
+          AND EXISTS (SELECT 1 FROM entries e WHERE e.document_id = d.id
+                       AND e.entry_date >= $2::date AND e.entry_date < ($2::date + interval '1 month'))`,
+      [id, start]
+    ),
+    query(
+      `SELECT d.id, d.extracted->'invoice'->>'supplier_name' AS supplier, d.extracted->'invoice'->>'number' AS number,
+              (d.extracted->'invoice'->>'withholding_tax')::numeric AS amount
+         FROM documents d
+        WHERE d.company_id = $1 AND d.doc_type IN ('facture_achat', 'ticket_caisse')
+          AND COALESCE((d.extracted->'invoice'->>'withholding_tax')::numeric, 0) > 0
+          AND EXISTS (SELECT 1 FROM entries e WHERE e.document_id = d.id
+                       AND e.entry_date >= $2::date AND e.entry_date < ($2::date + interval '1 month'))`,
+      [id, start]
+    ),
+    query(
+      `SELECT count(*)::int AS n FROM entries
+        WHERE company_id = $1 AND status = 'draft' AND entry_date >= $2::date AND entry_date < ($2::date + interval '1 month')`,
+      [id, start]
+    ),
+  ]);
+
+  const salesTaxes = { stamp: 0, fodec: 0 };
+  for (const s of sales) {
+    const sign = s.doc_type === 'avoir_vente' ? -1 : 1;
+    salesTaxes.stamp += sign * m(s.stamp);
+    salesTaxes.fodec += sign * m(s.fodec);
+  }
+  const decl = computeDeclaration({
+    month,
+    current: { collectee: m(cur[0].collectee), deductible: m(cur[0].deductible), caHt: m(cur[0].ca_ht), rs: m(cur[0].rs) },
+    history: hist.map((h) => ({ month: h.month, collectee: m(h.collectee), deductible: m(h.deductible) })),
+    salesTaxes,
+  });
+
+  const dt = (v) => fromMillimes(v);
+  res.json({
+    ...decl,
+    tva: Object.fromEntries(Object.entries(decl.tva).map(([k, v]) => [k, dt(v)])),
+    chiffreAffairesHt: dt(decl.chiffreAffairesHt),
+    chiffreAffairesTtc: dt(decl.chiffreAffairesTtc),
+    lines: decl.lines.map((l) => ({ ...l, base: l.base === null ? null : dt(l.base), amount: dt(l.amount) })),
+    total: dt(decl.total),
+    company: { name: req.company.name, matricule_fiscal: req.company.matricule_fiscal },
+    drafts: drafts[0].n,
+    sales_documents: sales.length,
+    withholding_detected: rsDocs.map((r) => ({ document_id: r.id, supplier: r.supplier, number: r.number, amount: r.amount })),
+  });
 });
 
 function csvCell(v) {

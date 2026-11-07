@@ -247,3 +247,11 @@ tr.entry-head td { background: var(--surface-2); font-weight: 600; }
   .dash-grid, .doc-grid, .grid-2 { grid-template-columns: 1fr; }
   .preview { position: static; max-height: none; }
 }
+
+@media print {
+  .sidebar, .mobile-bar, .no-print, .toast { display: none !important; }
+  .layout { display: block; }
+  .main { padding: 0; max-width: none; }
+  .card { box-shadow: none; border: none; padding: 0; }
+  body { background: #fff; color: #000; }
+}
