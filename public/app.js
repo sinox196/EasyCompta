@@ -1,4 +1,4 @@
-import { api, esc, money, fmtDate, fmtDateTime, badge, toast, compressImage, uploadWithProgress, DOC_TYPE_LABELS } from './common.js';
+import { api, esc, money, fmtDate, fmtDateTime, badge, toast, compressImage, uploadWithProgress, DOC_TYPE_LABELS, logo, countUp } from './common.js';
 
 const root = document.getElementById('root');
 const state = { user: null, companies: [], companyId: null, plan: null };
@@ -44,9 +44,21 @@ window.addEventListener('hashchange', () => state.user && route());
 function renderAuth(mode = 'login') {
   root.innerHTML = `
   <div class="auth-wrap">
+    <section class="auth-hero">
+      <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+      ${logo('', true)}
+      <h1>Votre comptabilité se fait toute seule.</h1>
+      <p class="lead">Scannez vos factures et relevés bancaires avec le téléphone : l'IA les lit et passe les écritures selon le plan comptable tunisien.</p>
+      <ul>
+        <li><span>📷</span>Scan depuis le téléphone, sans ressaisie</li>
+        <li><span>✨</span>Écritures, lettrage et contrôles automatiques</li>
+        <li><span>🧾</span>Déclaration mensuelle, bilan et TVA prêts</li>
+      </ul>
+    </section>
+    <div class="auth-side">
     <div class="card auth-card">
-      <div class="brand" style="margin-bottom:6px"><img src="/icons/icon.svg" alt=""> EasyCompta</div>
-      <p class="muted">Scannez vos factures et relevés : l'IA fait la saisie comptable.</p>
+      <div style="text-align:center">${logo()}</div>
+      <p class="muted" style="text-align:center">Connectez-vous pour accéder à vos dossiers.</p>
       <div class="tabs" role="tablist">
         <button data-mode="login" class="${mode === 'login' ? 'active' : ''}">Connexion</button>
         <button data-mode="register" class="${mode === 'register' ? 'active' : ''}">Créer un compte</button>
@@ -58,8 +70,9 @@ function renderAuth(mode = 'login') {
         <div class="field"><label for="f-email">Email</label><input id="f-email" name="email" type="email" autocomplete="email" required></div>
         <div class="field"><label for="f-pass">Mot de passe</label><input id="f-pass" name="password" type="password" minlength="8" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}" required></div>
         <div id="auth-error" class="alert error hidden"></div>
-        <button class="primary" style="width:100%;justify-content:center">${mode === 'login' ? 'Se connecter' : 'Créer mon compte'}</button>
+        <button class="primary" style="width:100%;justify-content:center;min-height:46px">${mode === 'login' ? 'Se connecter' : 'Créer mon compte'}</button>
       </form>
+    </div>
     </div>
   </div>`;
   root.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => renderAuth(b.dataset.mode)));
@@ -100,11 +113,12 @@ function renderShell() {
   root.innerHTML = `
   <div class="mobile-bar">
     <button class="ghost" id="menu-btn" aria-label="Menu">☰</button>
-    <div class="brand"><img src="/icons/icon.svg" alt=""> EasyCompta</div>
+    ${logo()}
   </div>
+  <div class="top-loader" id="top-loader"></div>
   <div class="layout">
-    <aside class="sidebar" id="sidebar">
-      <div class="brand"><img src="/icons/icon.svg" alt=""> EasyCompta</div>
+    <aside class="sidebar intro" id="sidebar">
+      <a href="#/dashboard" aria-label="Tableau de bord">${logo('', true)}</a>
       <div>
         <label for="company-select">Société</label>
         <select id="company-select"></select>
@@ -116,6 +130,7 @@ function renderShell() {
     </aside>
     <main class="main" id="main"></main>
   </div>`;
+  setTimeout(() => root.querySelector('#sidebar')?.classList.remove('intro'), 1200);
   root.querySelector('#menu-btn').addEventListener('click', () => root.querySelector('#sidebar').classList.toggle('open'));
   root.querySelector('#logout').addEventListener('click', async () => {
     await api('/auth/logout', { method: 'POST' });
@@ -139,8 +154,8 @@ function renderSidebar() {
   const current = (location.hash.replace(/^#\/?/, '').split('/')[0]) || 'dashboard';
   const toReview = company()?.to_review || 0;
   root.querySelector('#nav').innerHTML = NAV.map(
-    ([id, label]) =>
-      `<a href="#/${id}" class="${current === id ? 'active' : ''}">${label}${id === 'documents' && toReview ? `<span class="count">${toReview}</span>` : ''}</a>`
+    ([id, label], i) =>
+      `<a href="#/${id}" style="--i:${i}" class="${current === id ? 'active' : ''}">${label}${id === 'documents' && toReview ? `<span class="count">${toReview}</span>` : ''}</a>`
   ).join('');
 }
 
@@ -154,13 +169,34 @@ async function route() {
   const [page = 'dashboard', arg] = location.hash.replace(/^#\/?/, '').split('/');
   renderSidebar();
   if (!state.companyId && !['dossiers', 'aide'].includes(page)) return viewNoCompany();
+  const loader = root.querySelector('#top-loader');
+  loader?.classList.add('on');
   const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, assistant: viewAssistant, echeancier: viewEcheancier, etats: viewEtats, immobilisations: viewImmobilisations, controles: viewControles, telephone: viewPhone, dossiers: viewCompanies, aide: viewHelp };
   try {
     await (views[page] || viewDashboard)();
   } catch (err) {
     if (err.status === 401) return renderAuth();
     main().innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
+  } finally {
+    loader?.classList.remove('on');
   }
+  animatePage();
+  window.scrollTo({ top: 0 });
+}
+
+// Entrée de page : les blocs apparaissent les uns après les autres, puis les
+// rafraîchissements automatiques (documents en cours) se font sans animation.
+let enterTimer;
+function animatePage() {
+  const m = main();
+  if (!m) return;
+  [...m.children].forEach((el, i) => el.style.setProperty('--i', Math.min(i, 8)));
+  m.classList.remove('page-enter');
+  void m.offsetWidth;
+  m.classList.add('page-enter');
+  countUp(m);
+  clearTimeout(enterTimer);
+  enterTimer = setTimeout(() => m.classList.remove('page-enter'), 1400);
 }
 
 function viewNoCompany() {
@@ -196,18 +232,18 @@ async function viewDashboard() {
     <div class="page-head"><h1>${esc(c.name)}</h1><span class="muted">Exercice ${new Date().getFullYear()}</span></div>
     ${ai_ready ? '' : '<div class="alert warn">L\'IA n\'est pas encore configurée sur le serveur (variable <b>GEMINI_API_KEY</b> ou <b>ANTHROPIC_API_KEY</b>). Les documents restent en attente.</div>'}
     <div class="kpis">
-      <div class="card kpi"><div class="label">En cours de lecture</div><div class="value">${inQueue}</div></div>
-      <div class="card kpi"><div class="label">À vérifier</div><div class="value" style="color:var(--warn)">${d.review || 0}</div></div>
-      <div class="card kpi"><div class="label">Comptabilisés</div><div class="value" style="color:var(--ok)">${d.done || 0}</div></div>
-      <div class="card kpi"><div class="label">Charges ${new Date().getFullYear()}</div><div class="value">${money(stats.totals.charges)}</div></div>
-      <div class="card kpi"><div class="label">Chiffre d'affaires</div><div class="value">${money(stats.totals.produits)}</div></div>
-      <div class="card kpi"><div class="label">Banque (mouvements)</div><div class="value">${money(stats.totals.banque)}</div></div>
-      <a class="card kpi" href="#/echeancier" style="text-decoration:none;color:inherit"><div class="label">Lignes à lettrer</div><div class="value">${evo.a_lettrer}</div></a>
+      <div class="card kpi hero"><div class="label">Chiffre d'affaires ${year}</div><div class="value" data-count="${Number(stats.totals.produits)}" data-decimals="3">${money(stats.totals.produits)}</div></div>
+      <div class="card kpi hoverable"><div class="label">Charges ${year}</div><div class="value" data-count="${Number(stats.totals.charges)}" data-decimals="3">${money(stats.totals.charges)}</div></div>
+      <div class="card kpi hoverable"><div class="label">Banque (mouvements)</div><div class="value" data-count="${Number(stats.totals.banque)}" data-decimals="3">${money(stats.totals.banque)}</div></div>
+      <div class="card kpi hoverable"><div class="label">En cours de lecture</div><div class="value" data-count="${inQueue}">${inQueue}</div></div>
+      <a class="card kpi" href="#/documents" style="text-decoration:none;color:inherit"><div class="label">À vérifier</div><div class="value" style="color:var(--warn)" data-count="${d.review || 0}">${d.review || 0}</div></a>
+      <div class="card kpi hoverable"><div class="label">Comptabilisés</div><div class="value" style="color:var(--ok)" data-count="${d.done || 0}">${d.done || 0}</div></div>
+      <a class="card kpi" href="#/echeancier" style="text-decoration:none;color:inherit"><div class="label">Lignes à lettrer</div><div class="value" data-count="${evo.a_lettrer}">${evo.a_lettrer}</div></a>
     </div>
     <div class="dash-grid" style="margin-top:16px;align-items:start">
       <div class="card">
         <div class="row" style="margin-bottom:6px"><h2 style="margin:0">Chiffre d'affaires et charges ${year}</h2><span class="spacer"></span>
-          <span class="small"><span class="legend-dot" style="background:var(--primary)"></span>CA <span class="legend-dot" style="background:var(--accent);margin-left:10px"></span>Charges</span></div>
+          <span class="small"><span class="legend-dot" style="background:var(--teal)"></span>CA <span class="legend-dot" style="background:var(--navy-soft);margin-left:10px"></span>Charges</span></div>
         ${barChart(evo.months)}
       </div>
       <div class="card">
@@ -250,6 +286,7 @@ function uploadCard() {
   <div class="card">
     <h2>Ajouter des documents</h2>
     <div class="dropzone" id="dropzone">
+      <div class="drop-icon" aria-hidden="true">📄</div>
       <p><b>Glissez vos factures, tickets ou relevés bancaires ici</b><br><span class="muted small">PDF, JPG, PNG — un fichier = un document. L'IA les lit et passe les écritures automatiquement.</span></p>
       <div class="row" style="justify-content:center">
         <select id="type-hint" style="width:auto">
@@ -540,7 +577,7 @@ function bindEntryEditor(card) {
       card.querySelector('.head .badge').outerHTML = badge('validated');
       refreshCompanyCounts();
     } catch (err) {
-      toast(err.message);
+      toast(err.message, 'error');
     }
   });
   recompute();
@@ -790,7 +827,7 @@ async function viewCompanies() {
         if (!f.dataset.id) { state.companyId = res.company.id; store('ec_company', String(res.company.id)); }
         toast('Société enregistrée');
         viewCompanies();
-      } catch (err) { toast(err.message); }
+      } catch (err) { toast(err.message, 'error'); }
     });
     f.querySelector('[data-delete]')?.addEventListener('click', async () => {
       if (!confirm('Supprimer cette société, tous ses documents et toutes ses écritures ?')) return;
@@ -860,11 +897,13 @@ function barChart(months) {
   const bars = data.map((d, i) => {
     const x = i * gap + gap / 2 - bw;
     const hp = (d.p / max) * (H - 24), hc = (d.c / max) * (H - 24);
-    return `<rect x="${x}" y="${H - 20 - hp}" width="${bw - 2}" height="${hp}" rx="2" fill="var(--primary)"><title>CA ${names[i]} : ${money(d.p)}</title></rect>
-      <rect x="${x + bw}" y="${H - 20 - hc}" width="${bw - 2}" height="${hc}" rx="2" fill="var(--accent)"><title>Charges : ${money(d.c)}</title></rect>
+    return `<rect class="bar" style="animation-delay:${i * 50}ms" x="${x}" y="${H - 20 - hp}" width="${bw - 2}" height="${hp}" rx="4" fill="url(#gTeal)"><title>CA ${names[i]} : ${money(d.p)}</title></rect>
+      <rect class="bar" style="animation-delay:${i * 50 + 25}ms" x="${x + bw}" y="${H - 20 - hc}" width="${bw - 2}" height="${hc}" rx="4" fill="url(#gNavy)"><title>Charges : ${money(d.c)}</title></rect>
       <text x="${i * gap + gap / 2}" y="${H - 4}" text-anchor="middle" font-size="11" fill="var(--muted)">${names[i]}</text>`;
   }).join('');
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Chiffre d'affaires et charges par mois"><line x1="0" x2="${W}" y1="${H - 20}" y2="${H - 20}" stroke="var(--border)"/>${bars}</svg>`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Chiffre d'affaires et charges par mois">
+    <defs><linearGradient id="gTeal" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#14c2b0"/><stop offset="1" stop-color="#02a091"/></linearGradient>
+    <linearGradient id="gNavy" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d5a6d"/><stop offset="1" stop-color="#063643"/></linearGradient></defs><line x1="0" x2="${W}" y1="${H - 20}" y2="${H - 20}" stroke="var(--border)"/>${bars}</svg>`;
 }
 
 const CHECK_ICON = { error: '⛔', warn: '⚠️', info: 'ℹ️', ok: '✅' };
@@ -988,7 +1027,7 @@ async function viewImmobilisations() {
     try {
       await api(`/companies/${c.id}/immobilisations/${inp.dataset.rate}`, { method: 'PUT', body: { rate: inp.value.replace(',', '.') } });
       viewImmobilisations();
-    } catch (err) { toast(err.message); }
+    } catch (err) { toast(err.message, 'error'); }
   }));
   main().querySelector('#dotations')?.addEventListener('click', async () => {
     const r = await api(`/companies/${c.id}/immobilisations/dotations`, { method: 'POST', body: { year: immoYear } });
@@ -1016,7 +1055,7 @@ async function viewAssistant() {
     <div class="card chat">
       <div class="chat-log" id="chat-log">
         ${history.length ? '' : `<div class="muted">Posez une question sur la comptabilité de <b>${esc(c.name)}</b>, en français ou en tounsi. L'assistant répond à partir de vos documents et écritures.</div>
-          <div class="row" style="margin-top:10px">${suggestions.map((q) => `<button class="small" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>`}
+          <div class="chips" style="margin-top:12px">${suggestions.map((q, i) => `<button class="small" style="animation-delay:${i * 60}ms" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>`}
         ${history.map((m) => `<div class="msg ${m.role}">${m.role === 'user' ? esc(m.content) : formatAnswer(m.content)}</div>`).join('')}
       </div>
       <form id="chat-form" class="row" style="margin-top:12px;flex-wrap:nowrap">
@@ -1030,7 +1069,7 @@ async function viewAssistant() {
     history.push({ role: 'user', content: q });
     viewAssistant();
     const l = main().querySelector('#chat-log');
-    l.insertAdjacentHTML('beforeend', '<div class="msg assistant muted" id="thinking">…</div>');
+    l.insertAdjacentHTML('beforeend', '<div class="msg assistant" id="thinking"><span class="typing"><i></i><i></i><i></i></span></div>');
     l.scrollTop = l.scrollHeight;
     try {
       const { answer } = await api(`/companies/${c.id}/assistant`, { method: 'POST', body: { messages: history } });
