@@ -70,18 +70,15 @@ export function badge(status) {
 }
 
 let toastTimer;
-export function toast(msg) {
-  let el = document.querySelector('.toast');
-  if (!el) {
-    el = document.createElement('div');
-    el.className = 'toast';
-    el.setAttribute('role', 'status');
-    document.body.appendChild(el);
-  }
+export function toast(msg, type = 'ok') {
+  document.querySelector('.toast')?.remove();
+  const el = document.createElement('div');
+  el.className = `toast ${type === 'error' ? 'error' : ''}`;
+  el.setAttribute('role', 'status');
+  document.body.appendChild(el);
   el.textContent = msg;
-  el.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.add('hidden'), 3500);
+  toastTimer = setTimeout(() => el.remove(), 3800);
 }
 
 // Réduit les photos avant envoi (une photo de téléphone fait souvent 4-8 Mo) et
@@ -130,5 +127,30 @@ export function uploadWithProgress(path, form, onProgress) {
     };
     xhr.onerror = () => reject(new Error('Connexion impossible. Vérifiez internet.'));
     xhr.send(form);
+  });
+}
+
+// Logo adapté au thème (clair / sombre).
+export function logo(cls = '', forceLight = false) {
+  if (forceLight) return `<img class="brand-logo ${cls}" src="/brand/logo-light.png" alt="EasyCompta">`;
+  return `<picture><source srcset="/brand/logo-light.png" media="(prefers-color-scheme: dark)"><img class="brand-logo ${cls}" src="/brand/logo.png" alt="EasyCompta"></picture>`;
+}
+
+// Animation des chiffres (compteur qui monte jusqu'à la valeur finale).
+export function countUp(root) {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  root.querySelectorAll('[data-count]').forEach((el) => {
+    const target = Number(el.dataset.count);
+    const decimals = Number(el.dataset.decimals || 0);
+    const fmt = new Intl.NumberFormat('fr-FR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    const start = performance.now();
+    const dur = 900;
+    const step = (now) => {
+      const t = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - t, 3);
+      el.textContent = fmt.format(target * eased);
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
   });
 }

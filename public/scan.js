@@ -1,4 +1,4 @@
-import { api, esc, badge, toast, compressImage, uploadWithProgress, fmtDateTime } from './common.js';
+import { api, esc, badge, toast, compressImage, uploadWithProgress, fmtDateTime, logo } from './common.js';
 
 const root = document.getElementById('root');
 const state = { companies: [], companyId: null, type: 'auto', pages: [], sending: false };
@@ -21,7 +21,7 @@ async function boot() {
       if (res.company_id) store('ec_scan_company', String(res.company_id));
       toast('Téléphone connecté à votre compte ✓');
     } catch (err) {
-      toast(err.message);
+      toast(err.message, 'error');
     }
   }
   try {
@@ -38,9 +38,9 @@ async function boot() {
 
 function renderLogin(error = '') {
   root.innerHTML = `
-    <div class="scan-top"><img src="/icons/icon.svg" width="36" height="36" alt=""><h1 style="margin:0">EasyCompta Scan</h1></div>
+    <div class="scan-top">${logo('', true)}</div>
     <div class="alert info">Le plus simple : sur l'ordinateur, ouvrez EasyCompta → <b>Connecter mon téléphone</b> et scannez le QR code avec l'appareil photo.</div>
-    <div class="card">
+    <div class="card login-card">
       <h2>Ou connectez-vous</h2>
       <form id="login">
         <div class="field"><label for="e">Email</label><input id="e" name="email" type="email" autocomplete="email" required></div>
@@ -74,7 +74,7 @@ function render() {
   }
   root.innerHTML = `
     <div class="scan-top">
-      <img src="/icons/icon.svg" width="36" height="36" alt="">
+      ${logo('', true)}
       <select id="company" aria-label="Société">${state.companies.map((c) => `<option value="${c.id}" ${c.id === state.companyId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
     </div>
     <div class="chips" role="radiogroup" aria-label="Type de document">
@@ -82,13 +82,13 @@ function render() {
     </div>
     <div style="margin-top:12px">
       <label class="btn shoot" for="camera" style="margin:0">
-        <span class="big">📷</span>
+        <span class="big" aria-hidden="true">📷</span>
         ${state.pages.length ? 'Ajouter une page' : 'Scanner un document'}
         <span class="small" style="font-weight:400">facture, ticket, relevé bancaire…</span>
       </label>
       <input id="camera" type="file" accept="image/*" capture="environment" class="hidden">
       <div class="row" style="margin-top:8px;justify-content:center">
-        <label class="btn" for="gallery" style="margin:0;font-size:.9rem;color:var(--text)">🖼 Importer depuis la galerie / PDF</label>
+        <label class="btn gallery-btn" for="gallery">🖼 Importer depuis la galerie / PDF</label>
         <input id="gallery" type="file" accept="image/*,application/pdf" multiple class="hidden">
       </div>
     </div>
@@ -142,7 +142,7 @@ async function addFiles(fileList) {
       const file = await compressImage(f);
       state.pages.push({ file, url: file.type.startsWith('image/') ? URL.createObjectURL(file) : null });
     } catch (err) {
-      toast(`${f.name} : ${err.message}`);
+      toast(`${f.name} : ${err.message}`, 'error');
     }
   }
   render();
@@ -166,11 +166,11 @@ async function send() {
       if (bar) bar.style.width = `${Math.round(p * 100)}%`;
     });
     if (navigator.vibrate) navigator.vibrate(60);
-    toast('Envoyé ✓ L\'IA s\'occupe de la saisie.');
+    showSuccess();
     state.pages.forEach((p) => p.url && URL.revokeObjectURL(p.url));
     state.pages = [];
   } catch (err) {
-    toast(err.message);
+    toast(err.message, 'error');
   } finally {
     state.sending = false;
     render();
@@ -193,6 +193,19 @@ async function loadRecent() {
     if (err.status === 401) return renderLogin();
     list.innerHTML = `<li class="muted">${esc(err.message)}</li>`;
   }
+}
+
+// Confirmation animée après l'envoi.
+function showSuccess() {
+  const el = document.createElement('div');
+  el.className = 'success';
+  el.innerHTML = `<div class="box">
+    <svg width="76" height="76" viewBox="0 0 76 76" aria-hidden="true"><circle cx="38" cy="38" r="30" fill="none" stroke="#02a091" stroke-width="5"/>
+      <path d="M25 39l9 9 18-19" fill="none" stroke="#02a091" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <h2 style="margin:10px 0 4px">Envoyé !</h2><p class="muted" style="margin:0">L'IA s'occupe de la saisie.</p></div>`;
+  document.body.appendChild(el);
+  el.addEventListener('click', () => el.remove());
+  setTimeout(() => el.remove(), 1800);
 }
 
 boot();
