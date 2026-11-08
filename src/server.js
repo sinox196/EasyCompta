@@ -8,6 +8,7 @@ import { aiConfigured, aiDescription } from './ai/extract.js';
 import { authRouter } from './routes/auth.js';
 import { documentsRouter } from './routes/documents.js';
 import { entriesRouter } from './routes/entries.js';
+import { analyseRouter } from './routes/analyse.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, '..', 'public');
@@ -30,6 +31,7 @@ app.get('/api/health', async (req, res) => {
 app.use('/api', authRouter);
 app.use('/api', entriesRouter);
 app.use('/api', documentsRouter);
+app.use('/api', analyseRouter);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Route inconnue' }));
 
 app.use(

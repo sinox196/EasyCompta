@@ -114,3 +114,23 @@ async function extractWithModel(model, system, pages, userText, schema) {
   });
   return parseJson(responseText(data));
 }
+
+// Réponse en texte libre (assistant). Mêmes modèles de secours que pour l'extraction.
+export async function askGemini(system, messages) {
+  const contents = messages.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+  let lastErr;
+  for (const model of [GEMINI_MODEL, ...GEMINI_FALLBACKS]) {
+    try {
+      const data = await call(model, {
+        systemInstruction: { parts: [{ text: system }] },
+        contents,
+        generationConfig: { temperature: 0.3, maxOutputTokens: 4096 },
+      });
+      return responseText(data);
+    } catch (err) {
+      if (!(err instanceof GeminiError) || !SWITCH_MODEL.has(err.status)) throw err;
+      if (!lastErr || err.status !== 404) lastErr = err;
+    }
+  }
+  throw lastErr;
+}

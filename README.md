@@ -17,6 +17,12 @@ On scanne une facture, un ticket ou un relevé bancaire avec le téléphone. L'I
 - **Apprentissage** : quand on corrige le compte d'un fournisseur, d'un client ou d'un libellé bancaire, EasyCompta le retient pour les prochains documents de ce tiers.
 - **États** : journal, balance, grand livre, TVA de l'année, export CSV (s'ouvre dans Excel).
 - **Déclaration fiscale mensuelle** : TVA (avec crédit reporté), retenues à la source, droit de timbre, FODEC, TCL, total à payer et date limite, version imprimable (`src/accounting/declaration.js`). Les charges sur salaires ne sont pas encore calculées.
+- **Lettrage automatique et échéancier** : après chaque document, les paiements des relevés sont rapprochés des factures (même tiers, même montant, plusieurs factures réglées par un seul virement, paiement net de retenue à la source). Ce qui reste est listé « à encaisser » ou « à payer », avec les retards (`src/accounting/lettrage.js`).
+- **Immobilisations et amortissements** : un achat de matériel lu par l'IA crée la fiche d'immobilisation, avec un amortissement linéaire au prorata des jours et l'écriture de dotations de l'année (`src/accounting/amortissement.js`).
+- **Bilan et état de résultat** simplifiés, version imprimable (`src/accounting/etats.js`).
+- **Contrôles automatiques** : factures scannées deux fois (aussi signalées dès la lecture), compte d'attente non soldé, caisse négative, fournisseurs débiteurs ou clients créditeurs, mois sans relevé bancaire, factures en retard, écritures déséquilibrées.
+- **Assistant IA** : questions en français ou en tounsi sur la comptabilité de la société (« chkoun ma 5allasnich ? »). Il répond à partir des chiffres du dossier.
+- **Tableau de bord** : graphique du chiffre d'affaires et des charges par mois, lignes à lettrer, résumé des contrôles.
 - **Multi-sociétés** : un cabinet peut gérer plusieurs dossiers.
 - Une page **« Comment ça marche ? »** explique la comptabilité aux non-comptables.
 

@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { EXPENSE_CATEGORIES, BANK_CATEGORIES } from '../accounting/plan-comptable.js';
-import { extractWithGemini, GeminiError, GEMINI_MODEL } from './gemini.js';
+import { extractWithGemini, askGemini, GeminiError, GEMINI_MODEL } from './gemini.js';
 
 const MODEL = process.env.AI_MODEL || 'claude-opus-5-5';
 const EFFORT = process.env.AI_EFFORT || 'medium';
@@ -252,4 +252,26 @@ function mockExtraction(typeHint) {
     },
     bank: emptyBank,
   };
+}
+
+/**
+ * Assistant : répond à une question à partir du contexte comptable fourni.
+ * @param {string} system
+ * @param {{role:'user'|'assistant', content:string}[]} messages
+ */
+export async function askAI(system, messages) {
+  if (process.env.AI_MOCK === '1') {
+    return 'Mode démo : l\'assistant répondra ici à partir des chiffres de votre comptabilité.';
+  }
+  if (PROVIDER === 'gemini') return askGemini(system, messages);
+  const message = await getClient().messages.create({
+    model: MODEL,
+    max_tokens: 4096,
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'low' },
+    system,
+    messages,
+  });
+  if (message.stop_reason === 'refusal') throw new PermanentError('L\'assistant a refusé de répondre.');
+  return message.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
 }

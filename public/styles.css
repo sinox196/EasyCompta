@@ -248,6 +248,19 @@ tr.entry-head td { background: var(--surface-2); font-weight: 600; }
   .preview { position: static; max-height: none; }
 }
 
+/* Contrôles, graphique, assistant */
+.checks { list-style: none; margin: 0; padding: 0; }
+.check { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.check:last-child { border-bottom: none; }
+.check > div { flex: 1; }
+.check .btn { min-height: 30px; padding: 4px 10px; }
+.legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+.chat-log { max-height: calc(100vh - 260px); min-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; line-height: 1.5; }
+.msg.user { align-self: flex-end; background: var(--primary); color: #fff; border-bottom-right-radius: 4px; }
+.msg.assistant { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.msg ul { margin: 4px 0; padding-left: 18px; }
+
 @media print {
   .sidebar, .mobile-bar, .no-print, .toast { display: none !important; }
   .layout { display: block; }
