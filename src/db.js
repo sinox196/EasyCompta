@@ -132,6 +132,22 @@ const MIGRATIONS = [
 
 // Colonnes ajoutées après la première version (idempotent).
 MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ`);
+// Lettrage : même code sur une facture et son règlement.
+MIGRATIONS.push(`ALTER TABLE entry_lines ADD COLUMN IF NOT EXISTS lettrage TEXT`);
+MIGRATIONS.push(`CREATE INDEX IF NOT EXISTS entry_lines_account_idx ON entry_lines(account)`);
+// Immobilisations créées automatiquement à partir des factures d'achat.
+MIGRATIONS.push(`CREATE TABLE IF NOT EXISTS immobilisations (
+   id               SERIAL PRIMARY KEY,
+   company_id       INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+   document_id      INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+   entry_line_id    INTEGER UNIQUE REFERENCES entry_lines(id) ON DELETE SET NULL,
+   label            TEXT NOT NULL DEFAULT '',
+   account          TEXT NOT NULL,
+   acquisition_date DATE NOT NULL,
+   value            NUMERIC(15,3) NOT NULL,
+   rate             NUMERIC(6,3) NOT NULL,
+   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+ )`);
 
 export async function migrate() {
   for (const sql of MIGRATIONS) {

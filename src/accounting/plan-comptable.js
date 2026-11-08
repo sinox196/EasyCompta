@@ -11,6 +11,13 @@ export const ACCOUNTS = {
   '2282': 'Mobilier et matériel de bureau',
   '2283': 'Matériel informatique',
 
+  // Amortissements (2x8x)
+  '2813': 'Amortissements des logiciels',
+  '2823': 'Amortissements du matériel industriel',
+  '2824': 'Amortissements du matériel de transport',
+  '28282': 'Amortissements du mobilier et matériel de bureau',
+  '28283': 'Amortissements du matériel informatique',
+
   // Classe 1 - Capitaux propres et passifs non courants
   '161': 'Emprunts',
 
@@ -54,6 +61,7 @@ export const ACCOUNTS = {
   '64': 'Charges de personnel',
   '651': 'Charges d\'intérêts',
   '66': 'Impôts, taxes et versements assimilés',
+  '6811': 'Dotations aux amortissements des immobilisations',
   '6581': 'Autres charges ordinaires',
 
   // Classe 7 - Produits
@@ -105,6 +113,24 @@ export const BANK_CATEGORIES = {
   virement_interne: { account: '581', label: 'Virement entre comptes de la société' },
   autre: { account: '471', label: 'À classer' },
 };
+
+// Amortissement linéaire : compte d'amortissement et taux annuel par compte
+// d'immobilisation. Taux usuels, à faire confirmer par l'expert-comptable.
+export const DEPRECIATION = {
+  '213': { account: '2813', rate: 33.333 },
+  '223': { account: '2823', rate: 15 },
+  '224': { account: '2824', rate: 20 },
+  '2282': { account: '28282', rate: 10 },
+  '2283': { account: '28283', rate: 33.333 },
+};
+
+export function depreciationFor(account) {
+  for (let i = account.length; i > 0; i--) {
+    const d = DEPRECIATION[account.slice(0, i)];
+    if (d) return d;
+  }
+  return { account: `28${account.slice(1)}`, rate: 10 };
+}
 
 export const JOURNALS = {
   ACH: 'Journal des achats',

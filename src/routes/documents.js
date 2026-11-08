@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { query, withTransaction } from '../db.js';
 import { requireAuth, loadCompany } from '../auth.js';
-import { kickWorker } from '../worker.js';
+import { kickWorker, afterChange } from '../worker.js';
 import { aiConfigured } from '../ai/extract.js';
 
 export const documentsRouter = Router();
@@ -208,5 +208,6 @@ documentsRouter.post('/documents/:id/validate', loadDocument, async (req, res) =
 
 documentsRouter.delete('/documents/:id', loadDocument, async (req, res) => {
   await query('DELETE FROM documents WHERE id = $1', [req.doc.id]);
+  await afterChange(req.doc.company_id);
   res.json({ ok: true });
 });

@@ -5,6 +5,7 @@ import { entriesWithLines } from './documents.js';
 import { toMillimes, fromMillimes } from '../accounting/money.js';
 import { partnerKey } from '../accounting/entries.js';
 import { computeDeclaration } from '../accounting/declaration.js';
+import { afterChange } from '../worker.js';
 import { ACCOUNTS, JOURNALS, DOC_TYPES, EXPENSE_CATEGORIES, BANK_CATEGORIES, accountLabel } from '../accounting/plan-comptable.js';
 
 export const entriesRouter = Router();
@@ -111,6 +112,12 @@ entriesRouter.put('/entries/:id', loadEntry, async (req, res) => {
         WHERE id = $1`,
       [req.entry.id, journal, date, String(req.body?.label ?? req.entry.label).slice(0, 250), String(req.body?.piece_ref ?? req.entry.piece_ref).slice(0, 100), status]
     );
+    // Une écriture modifiée doit être re-lettrée : on libère ses codes et ceux de ses partenaires.
+    await client.query(
+      `UPDATE entry_lines SET lettrage = NULL WHERE lettrage IN
+         (SELECT lettrage FROM entry_lines WHERE entry_id = $1 AND lettrage IS NOT NULL)`,
+      [req.entry.id]
+    );
     await writeLines(client, req.entry.id, lines);
 
     // Apprentissage : le compte choisi par l'utilisateur pour ce tiers sera
@@ -135,6 +142,7 @@ entriesRouter.put('/entries/:id', loadEntry, async (req, res) => {
       }
     }
   });
+  await afterChange(req.entry.company_id);
   const [entry] = await entriesWithLines('e.id = $1', [req.entry.id]);
   res.json({ entry });
 });
@@ -152,12 +160,14 @@ entriesRouter.post('/companies/:companyId/entries', loadCompany, async (req, res
     await writeLines(client, rows[0].id, lines);
     return rows[0].id;
   });
+  await afterChange(req.company.id);
   const [entry] = await entriesWithLines('e.id = $1', [id]);
   res.json({ entry });
 });
 
 entriesRouter.delete('/entries/:id', loadEntry, async (req, res) => {
   await query('DELETE FROM entries WHERE id = $1', [req.entry.id]);
+  await afterChange(req.entry.company_id);
   res.json({ ok: true });
 });
 

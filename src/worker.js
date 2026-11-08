@@ -2,6 +2,7 @@ import { query, withTransaction } from './db.js';
 import { extractDocument, isRetryable, aiConfigured } from './ai/extract.js';
 import { buildEntries } from './accounting/entries.js';
 import { fromMillimes } from './accounting/money.js';
+import { runLettrage, syncImmobilisations, findDuplicate } from './accounting/automation.js';
 
 // File de traitement en arrière-plan, stockée dans PostgreSQL : chaque document
 // envoyé (web ou téléphone) est pris par le worker, lu par l'IA, puis transformé
@@ -59,7 +60,14 @@ export async function processDocument(doc) {
 
   const extracted = await extractDocument(company, pages, doc.type_hint);
   const rules = await loadRules(doc.company_id);
-  const { entries, warnings, needsReview, summary } = buildEntries(extracted, company, rules);
+  const built = buildEntries(extracted, company, rules);
+  const { entries, warnings, summary } = built;
+  let { needsReview } = built;
+  const duplicateOf = await findDuplicate(doc, extracted);
+  if (duplicateOf) {
+    warnings.unshift(`Doublon probable : cette facture a déjà été scannée (document n° ${duplicateOf}). Supprimez l'un des deux.`);
+    needsReview = true;
+  }
   const docStatus = needsReview ? 'review' : 'done';
   const entryStatus = needsReview ? 'draft' : 'validated';
 
@@ -72,6 +80,17 @@ export async function processDocument(doc) {
       [doc.id, docStatus, extracted.doc_type, JSON.stringify(extracted), JSON.stringify(warnings), summary]
     );
   });
+  await afterChange(doc.company_id);
+}
+
+// Après chaque changement d'écritures : lettrage et immobilisations automatiques.
+export async function afterChange(companyId) {
+  try {
+    await syncImmobilisations(companyId);
+    await runLettrage(companyId);
+  } catch (err) {
+    console.error('[auto] lettrage/immobilisations :', err.message);
+  }
 }
 
 async function runOne(doc) {

@@ -81,9 +81,14 @@ function renderAuth(mode = 'login') {
 
 const NAV = [
   ['dashboard', 'Tableau de bord'],
+  ['assistant', '✨ Assistant IA'],
   ['documents', 'Documents'],
   ['journal', 'Écritures'],
+  ['echeancier', 'Échéancier & lettrage'],
   ['balance', 'Balance & grand livre'],
+  ['etats', 'Bilan & résultat'],
+  ['immobilisations', 'Immobilisations'],
+  ['controles', 'Contrôles'],
   ['declaration', 'Déclaration fiscale'],
   ['tva', 'TVA de l\'année'],
   ['telephone', 'Connecter mon téléphone'],
@@ -149,7 +154,7 @@ async function route() {
   const [page = 'dashboard', arg] = location.hash.replace(/^#\/?/, '').split('/');
   renderSidebar();
   if (!state.companyId && !['dossiers', 'aide'].includes(page)) return viewNoCompany();
-  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, telephone: viewPhone, dossiers: viewCompanies, aide: viewHelp };
+  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, assistant: viewAssistant, echeancier: viewEcheancier, etats: viewEtats, immobilisations: viewImmobilisations, controles: viewControles, telephone: viewPhone, dossiers: viewCompanies, aide: viewHelp };
   try {
     await (views[page] || viewDashboard)();
   } catch (err) {
@@ -177,10 +182,14 @@ async function refreshCompanyCounts() {
 
 async function viewDashboard() {
   const c = company();
-  const [stats, { documents, ai_ready }] = await Promise.all([
+  const year = new Date().getFullYear();
+  const [stats, { documents, ai_ready }, evo, { checks }] = await Promise.all([
     api(`/companies/${c.id}/stats`),
     api(`/companies/${c.id}/documents?limit=8`),
+    api(`/companies/${c.id}/evolution?year=${year}`),
+    api(`/companies/${c.id}/controles?year=${year}`),
   ]);
+  const issues = checks.filter((k) => k.level !== 'ok');
   const d = stats.documents;
   const inQueue = (d.pending || 0) + (d.processing || 0);
   main().innerHTML = `
@@ -193,6 +202,19 @@ async function viewDashboard() {
       <div class="card kpi"><div class="label">Charges ${new Date().getFullYear()}</div><div class="value">${money(stats.totals.charges)}</div></div>
       <div class="card kpi"><div class="label">Chiffre d'affaires</div><div class="value">${money(stats.totals.produits)}</div></div>
       <div class="card kpi"><div class="label">Banque (mouvements)</div><div class="value">${money(stats.totals.banque)}</div></div>
+      <a class="card kpi" href="#/echeancier" style="text-decoration:none;color:inherit"><div class="label">Lignes à lettrer</div><div class="value">${evo.a_lettrer}</div></a>
+    </div>
+    <div class="dash-grid" style="margin-top:16px;align-items:start">
+      <div class="card">
+        <div class="row" style="margin-bottom:6px"><h2 style="margin:0">Chiffre d'affaires et charges ${year}</h2><span class="spacer"></span>
+          <span class="small"><span class="legend-dot" style="background:var(--primary)"></span>CA <span class="legend-dot" style="background:var(--accent);margin-left:10px"></span>Charges</span></div>
+        ${barChart(evo.months)}
+      </div>
+      <div class="card">
+        <div class="row" style="margin-bottom:6px"><h2 style="margin:0">Contrôles automatiques</h2><span class="spacer"></span><a href="#/controles">Détail →</a></div>
+        ${issues.length ? `<ul class="checks">${issues.slice(0, 5).map(checkItem).join('')}</ul>` : '<p style="color:var(--ok)">✓ Aucune anomalie détectée.</p>'}
+        ${evo.dernier_releve ? '' : '<p class="small muted">Aucun relevé bancaire scanné pour l\'instant.</p>'}
+      </div>
     </div>
     <div class="dash-grid" style="margin-top:16px">
       <div class="stack">
@@ -794,6 +816,10 @@ function viewHelp() {
       <li><b>Écritures automatiques</b> : le logiciel crée les écritures selon le plan comptable tunisien, toujours équilibrées (total débit = total crédit).</li>
       <li><b>Contrôle</b> : si tout est cohérent, c'est <span class="badge done">Comptabilisé</span>. En cas de doute (photo floue, totaux qui ne collent pas…), le document passe <span class="badge review">À vérifier</span> avec l'explication.</li>
       <li><b>Apprentissage</b> : si vous corrigez le compte d'un fournisseur, EasyCompta le retient pour ses prochaines factures.</li>
+      <li><b>Lettrage</b> : chaque paiement trouvé sur un relevé bancaire est relié à sa facture. L'<b>échéancier</b> montre qui vous doit de l'argent et qui vous devez payer.</li>
+      <li><b>Immobilisations</b> : un achat de matériel durable est amorti automatiquement sur plusieurs années.</li>
+      <li><b>Contrôles</b> : EasyCompta signale les doublons, les relevés manquants, les factures en retard…</li>
+      <li><b>Assistant IA</b> : posez vos questions (« chhal 3andi fel banque ? ») et il répond à partir de vos chiffres.</li>
       <li><b>Déclaration fiscale</b> : chaque mois, EasyCompta prépare la déclaration (TVA, retenues à la source, timbre, FODEC, TCL) avec le total à payer et la date limite.</li>
       <li><b>Export</b> : la balance, le grand livre et l'export Excel sont prêts pour l'expert-comptable.</li>
     </ol>
@@ -819,6 +845,209 @@ function viewHelp() {
     </dl>
     <p class="small muted">EasyCompta automatise la saisie. Les états de fin d'année (bilan, état de résultat, déclarations) restent à faire valider par un expert-comptable.</p>
   </div>`;
+}
+
+// --- Graphique et contrôles (tableau de bord) ------------------------------------
+
+function barChart(months) {
+  const data = Array.from({ length: 12 }, (_, i) => {
+    const m = months.find((x) => Number(x.month) === i + 1) || {};
+    return { p: Number(m.produits || 0), c: Number(m.charges || 0) };
+  });
+  const max = Math.max(1, ...data.flatMap((d) => [d.p, d.c]));
+  const W = 600, H = 180, bw = 16, gap = W / 12;
+  const names = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
+  const bars = data.map((d, i) => {
+    const x = i * gap + gap / 2 - bw;
+    const hp = (d.p / max) * (H - 24), hc = (d.c / max) * (H - 24);
+    return `<rect x="${x}" y="${H - 20 - hp}" width="${bw - 2}" height="${hp}" rx="2" fill="var(--primary)"><title>CA ${names[i]} : ${money(d.p)}</title></rect>
+      <rect x="${x + bw}" y="${H - 20 - hc}" width="${bw - 2}" height="${hc}" rx="2" fill="var(--accent)"><title>Charges : ${money(d.c)}</title></rect>
+      <text x="${i * gap + gap / 2}" y="${H - 4}" text-anchor="middle" font-size="11" fill="var(--muted)">${names[i]}</text>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Chiffre d'affaires et charges par mois"><line x1="0" x2="${W}" y1="${H - 20}" y2="${H - 20}" stroke="var(--border)"/>${bars}</svg>`;
+}
+
+const CHECK_ICON = { error: '⛔', warn: '⚠️', info: 'ℹ️', ok: '✅' };
+function checkItem(k) {
+  return `<li class="check ${k.level}"><span>${CHECK_ICON[k.level]}</span><div><b>${esc(k.title)}</b><div class="small muted">${esc(k.detail)}</div></div>${k.link ? `<a class="btn small" href="${k.link}">Voir</a>` : ''}</li>`;
+}
+
+function yearSelect(id, value) {
+  const y = new Date().getFullYear();
+  return `<select id="${id}" style="width:auto">${[1, 0, -1, -2, -3].map((i) => y + i).map((v) => `<option ${v === value ? 'selected' : ''}>${v}</option>`).join('')}</select>`;
+}
+
+// --- Contrôles -------------------------------------------------------------------
+
+let ctrlYear = new Date().getFullYear();
+async function viewControles() {
+  const { checks } = await api(`/companies/${company().id}/controles?year=${ctrlYear}`);
+  main().innerHTML = `
+    <div class="page-head"><h1>Contrôles automatiques</h1>${yearSelect('ctrl-year', ctrlYear)}</div>
+    <p class="muted">EasyCompta vérifie le dossier à chaque document : doublons, comptes qui ne devraient pas avoir ce solde, relevés manquants, factures impayées… Corrigez ce qui est signalé en rouge en priorité.</p>
+    <div class="card"><ul class="checks">${checks.map(checkItem).join('')}</ul></div>`;
+  main().querySelector('#ctrl-year').addEventListener('change', (e) => { ctrlYear = Number(e.target.value); viewControles(); });
+}
+
+// --- Échéancier & lettrage ---------------------------------------------------------
+
+async function viewEcheancier() {
+  const c = company();
+  const [{ items }, { lines }] = await Promise.all([api(`/companies/${c.id}/echeancier`), api(`/companies/${c.id}/lettrage`)]);
+  const section = (type, title, help) => {
+    const list = items.filter((i) => i.type === type);
+    const total = list.reduce((s, i) => s + Number(i.amount), 0);
+    const late = list.filter((i) => i.late).reduce((s, i) => s + Number(i.amount), 0);
+    return `<div class="card">
+      <div class="row"><h2 style="margin:0">${title}</h2><span class="spacer"></span><b class="mono">${money(total)} DT</b></div>
+      <p class="small muted">${help}${late ? ` Dont <b style="color:var(--danger)">${money(late)} DT en retard</b>.` : ''}</p>
+      ${list.length ? `<div class="table-wrap"><table><thead><tr><th>Tiers</th><th>Pièce</th><th>Date</th><th>Échéance</th><th class="num">Montant</th></tr></thead><tbody>
+        ${list.map((i) => `<tr><td>${esc(i.partner || '—')}${i.partial ? ' <span class="badge review">retenue à la source</span>' : ''}</td>
+          <td>${i.document_id ? `<a href="#/documents/${i.document_id}">${esc(i.piece_ref || 'voir')}</a>` : esc(i.piece_ref)}</td>
+          <td>${fmtDate(i.date)}</td><td>${fmtDate(i.due_date)} ${i.late ? `<span class="badge error">${i.days_late} j de retard</span>` : ''}</td>
+          <td class="num">${money(i.amount)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Rien en attente.</p>'}
+    </div>`;
+  };
+  const groups = {};
+  for (const l of lines) if (l.lettrage) (groups[l.lettrage] ||= []).push(l);
+  const lettered = Object.entries(groups);
+  main().innerHTML = `
+    <div class="page-head"><h1>Échéancier & lettrage</h1><span class="spacer"></span><button class="primary" id="auto-lettrage">↻ Lettrage automatique</button></div>
+    <p class="muted">Le <b>lettrage</b> relie chaque facture à son paiement trouvé dans les relevés bancaires. Il se fait tout seul après chaque document scanné. Ce qui reste non lettré est encore dû.</p>
+    <div class="grid-2">
+      ${section('a_encaisser', 'À encaisser (clients)', 'Factures de vente dont le paiement n\'apparaît pas encore sur un relevé.')}
+      ${section('a_payer', 'À payer (fournisseurs)', 'Factures d\'achat dont le règlement n\'apparaît pas encore sur un relevé.')}
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>Rapprochements effectués (${lettered.length})</h2>
+      ${lettered.length ? `<div class="table-wrap"><table><thead><tr><th>Code</th><th>Date</th><th>Tiers</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th><th></th></tr></thead><tbody>
+        ${lettered.map(([code, ls]) => ls.map((l, i) => `<tr class="${i === 0 ? 'entry-head' : ''}"><td class="mono">${i === 0 ? esc(code) : ''}</td><td>${fmtDate(l.date)}</td><td>${esc(l.third_party)}</td><td>${esc(l.label)}</td>
+          <td class="num">${Number(l.debit) ? money(l.debit) : ''}</td><td class="num">${Number(l.credit) ? money(l.credit) : ''}</td>
+          <td>${i === 0 ? `<button class="ghost small" data-unletter="${esc(code)}">Défaire</button>` : ''}</td></tr>`).join('')).join('')}
+      </tbody></table></div>` : '<p class="muted">Aucun rapprochement pour l\'instant : scannez vos relevés bancaires.</p>'}
+    </div>`;
+  main().querySelector('#auto-lettrage').addEventListener('click', async () => {
+    const { matched } = await api(`/companies/${c.id}/lettrage/auto`, { method: 'POST' });
+    toast(matched ? `${matched} rapprochement(s) trouvé(s)` : 'Aucun nouveau rapprochement');
+    viewEcheancier();
+  });
+  main().querySelectorAll('[data-unletter]').forEach((b) => b.addEventListener('click', async () => {
+    await api(`/companies/${c.id}/lettrage/${encodeURIComponent(b.dataset.unletter)}`, { method: 'DELETE' });
+    viewEcheancier();
+  }));
+}
+
+// --- Bilan & résultat --------------------------------------------------------------
+
+let etatsYear = new Date().getFullYear();
+async function viewEtats() {
+  const d = await api(`/companies/${company().id}/etats?year=${etatsYear}`);
+  const rows = (ls) => ls.map((l) => `<tr><td>${esc(l.label)}</td><td class="num">${money(l.amount)}</td></tr>`).join('');
+  const net = Number(d.resultat.net);
+  main().innerHTML = `
+    <div class="page-head no-print"><h1>Bilan & état de résultat</h1>${yearSelect('etats-year', etatsYear)}<span class="spacer"></span><button id="print">🖨 Imprimer / PDF</button></div>
+    <p class="muted no-print">Calculés automatiquement à partir de toutes les écritures. Le <b>résultat</b> dit si la société gagne ou perd de l'argent sur l'année ; le <b>bilan</b> montre ce qu'elle possède (actif) et ce qu'elle doit (passif) au 31/12. Version simplifiée, indicative : les états officiels de fin d'année restent à établir avec l'expert-comptable.</p>
+    <div class="card" style="margin-bottom:16px">
+      <h2>État de résultat ${d.year} — ${esc(company().name)}</h2>
+      <div class="table-wrap"><table><tbody>${rows(d.resultat.lines)}
+        <tr class="entry-head"><td>Résultat d'exploitation</td><td class="num">${money(d.resultat.exploitation)}</td></tr></tbody>
+        <tfoot><tr><td>Résultat net (${net >= 0 ? 'bénéfice' : 'perte'})</td><td class="num" style="color:${net >= 0 ? 'var(--ok)' : 'var(--danger)'}">${money(net)}</td></tr></tfoot></table></div>
+    </div>
+    <div class="grid-2">
+      <div class="card"><h2>Actif au 31/12/${d.year}</h2><div class="table-wrap"><table><tbody>${rows(d.bilan.actif)}</tbody><tfoot><tr><td>Total actif</td><td class="num">${money(d.bilan.totalActif)}</td></tr></tfoot></table></div></div>
+      <div class="card"><h2>Passif au 31/12/${d.year}</h2><div class="table-wrap"><table><tbody>${rows(d.bilan.passif)}</tbody><tfoot><tr><td>Total passif</td><td class="num">${money(d.bilan.totalPassif)}</td></tr></tfoot></table></div></div>
+    </div>
+    ${Math.round(Number(d.bilan.totalActif) * 1000) === Math.round(Number(d.bilan.totalPassif) * 1000) ? '<p class="small" style="color:var(--ok)">✓ Bilan équilibré</p>' : '<p class="small" style="color:var(--danger)">⚠ Bilan déséquilibré : vérifiez les écritures</p>'}`;
+  main().querySelector('#etats-year').addEventListener('change', (e) => { etatsYear = Number(e.target.value); viewEtats(); });
+  main().querySelector('#print').addEventListener('click', () => window.print());
+}
+
+// --- Immobilisations -----------------------------------------------------------------
+
+let immoYear = new Date().getFullYear();
+async function viewImmobilisations() {
+  const c = company();
+  const { items } = await api(`/companies/${c.id}/immobilisations?year=${immoYear}`);
+  const total = (k) => items.reduce((s, i) => s + Number(i[k]), 0);
+  main().innerHTML = `
+    <div class="page-head"><h1>Immobilisations</h1>${yearSelect('immo-year', immoYear)}<span class="spacer"></span>
+      ${items.length ? `<button class="primary" id="dotations">Passer les dotations ${immoYear}</button>` : ''}</div>
+    <p class="muted">Quand l'IA lit l'achat d'un bien durable (ordinateur, véhicule, mobilier, machine, logiciel), il est ajouté ici automatiquement. Son coût est réparti sur plusieurs années : c'est l'<b>amortissement</b>. Le taux proposé est le taux usuel ; modifiez-le si votre comptable le demande.</p>
+    <div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Bien</th><th>Compte</th><th>Acquis le</th><th class="num">Valeur</th><th class="num">Taux %</th><th class="num">Amorti avant ${immoYear}</th><th class="num">Dotation ${immoYear}</th><th class="num">Valeur restante</th></tr></thead>
+      <tbody>${items.map((i) => `<tr>
+        <td>${i.document_id ? `<a href="#/documents/${i.document_id}">${esc(i.label)}</a>` : esc(i.label)}</td>
+        <td><span class="mono">${esc(i.account)}</span><div class="small muted">${esc(i.account_label)}</div></td>
+        <td>${fmtDate(i.acquisition_date)}</td><td class="num">${money(i.value)}</td>
+        <td class="num"><input class="num" style="width:80px" data-rate="${i.id}" value="${Number(i.rate)}" inputmode="decimal" aria-label="Taux"></td>
+        <td class="num">${money(i.cumul_avant)}</td><td class="num">${money(i.dotation)}</td><td class="num">${money(i.vnc)}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">Aucune immobilisation : elles apparaîtront dès qu\'une facture d\'achat de matériel sera scannée.</td></tr>'}</tbody>
+      ${items.length ? `<tfoot><tr><td colspan="3">Total</td><td class="num">${money(total('value'))}</td><td></td><td class="num">${money(total('cumul_avant'))}</td><td class="num">${money(total('dotation'))}</td><td class="num">${money(total('vnc'))}</td></tr></tfoot>` : ''}
+    </table></div></div>`;
+  main().querySelector('#immo-year').addEventListener('change', (e) => { immoYear = Number(e.target.value); viewImmobilisations(); });
+  main().querySelectorAll('[data-rate]').forEach((inp) => inp.addEventListener('change', async () => {
+    try {
+      await api(`/companies/${c.id}/immobilisations/${inp.dataset.rate}`, { method: 'PUT', body: { rate: inp.value.replace(',', '.') } });
+      viewImmobilisations();
+    } catch (err) { toast(err.message); }
+  }));
+  main().querySelector('#dotations')?.addEventListener('click', async () => {
+    const r = await api(`/companies/${c.id}/immobilisations/dotations`, { method: 'POST', body: { year: immoYear } });
+    toast(`Écriture de dotations ${immoYear} : ${money(r.total)} DT (journal OD, 31/12)`);
+  });
+}
+
+// --- Assistant IA ----------------------------------------------------------------------
+
+const chats = {};
+function formatAnswer(text) {
+  return esc(text)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/^\s*[-*•] (.*)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`)
+    .replace(/\n/g, '<br>');
+}
+
+async function viewAssistant() {
+  const c = company();
+  const history = (chats[c.id] ||= []);
+  const suggestions = ['Chhal 3andi fel banque taw ?', 'Chkoun mel clients ma 5allasnich ?', 'Chnowa akbar masrouf 3andi hal 3am ?', 'Est-ce que la société est bénéficiaire cette année ?', 'Chnowa lezem n3adi fel déclaration mta3 hal chhar ?'];
+  main().innerHTML = `
+    <div class="page-head"><h1>✨ Assistant IA</h1><span class="spacer"></span>${history.length ? '<button class="ghost" id="chat-clear">Nouvelle conversation</button>' : ''}</div>
+    <div class="card chat">
+      <div class="chat-log" id="chat-log">
+        ${history.length ? '' : `<div class="muted">Posez une question sur la comptabilité de <b>${esc(c.name)}</b>, en français ou en tounsi. L'assistant répond à partir de vos documents et écritures.</div>
+          <div class="row" style="margin-top:10px">${suggestions.map((q) => `<button class="small" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>`}
+        ${history.map((m) => `<div class="msg ${m.role}">${m.role === 'user' ? esc(m.content) : formatAnswer(m.content)}</div>`).join('')}
+      </div>
+      <form id="chat-form" class="row" style="margin-top:12px;flex-wrap:nowrap">
+        <input id="chat-input" placeholder="Votre question…" autocomplete="off" required>
+        <button class="primary">Envoyer</button>
+      </form>
+    </div>`;
+  const log = main().querySelector('#chat-log');
+  log.scrollTop = log.scrollHeight;
+  const ask = async (q) => {
+    history.push({ role: 'user', content: q });
+    viewAssistant();
+    const l = main().querySelector('#chat-log');
+    l.insertAdjacentHTML('beforeend', '<div class="msg assistant muted" id="thinking">…</div>');
+    l.scrollTop = l.scrollHeight;
+    try {
+      const { answer } = await api(`/companies/${c.id}/assistant`, { method: 'POST', body: { messages: history } });
+      history.push({ role: 'assistant', content: answer });
+    } catch (err) {
+      history.push({ role: 'assistant', content: `⚠ ${err.message}` });
+    }
+    if (location.hash.startsWith('#/assistant')) viewAssistant();
+  };
+  main().querySelector('#chat-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = main().querySelector('#chat-input').value.trim();
+    if (q) ask(q);
+  });
+  main().querySelectorAll('[data-q]').forEach((b) => b.addEventListener('click', () => ask(b.dataset.q)));
+  main().querySelector('#chat-clear')?.addEventListener('click', () => { chats[c.id] = []; viewAssistant(); });
+  main().querySelector('#chat-input').focus();
 }
 
 boot();
