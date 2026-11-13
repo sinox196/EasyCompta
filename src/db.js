@@ -132,6 +132,12 @@ const MIGRATIONS = [
 
 // Colonnes ajoutées après la première version (idempotent).
 MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ`);
+// Anti-doublons : empreinte des fichiers envoyés, et accord explicite pour
+// comptabiliser un document que l'IA a reconnu comme déjà importé.
+MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS file_hash TEXT`);
+MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS allow_duplicate BOOLEAN NOT NULL DEFAULT false`);
+MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS duplicate_of INTEGER`);
+MIGRATIONS.push(`CREATE INDEX IF NOT EXISTS documents_hash_idx ON documents(company_id, file_hash)`);
 // Lettrage : même code sur une facture et son règlement.
 MIGRATIONS.push(`ALTER TABLE entry_lines ADD COLUMN IF NOT EXISTS lettrage TEXT`);
 MIGRATIONS.push(`CREATE INDEX IF NOT EXISTS entry_lines_account_idx ON entry_lines(account)`);

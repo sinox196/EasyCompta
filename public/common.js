@@ -52,6 +52,7 @@ export const STATUS_LABELS = {
   done: 'Comptabilisé',
   error: 'Erreur',
   draft: 'Brouillon',
+  duplicate: 'Doublon',
   validated: 'Validée',
 };
 
@@ -128,6 +129,25 @@ export function uploadWithProgress(path, form, onProgress) {
     xhr.onerror = () => reject(new Error('Connexion impossible. Vérifiez internet.'));
     xhr.send(form);
   });
+}
+
+// Export CSV lisible directement par Excel (séparateur « ; », virgule décimale, BOM UTF-8).
+// Les cellules numériques (type number) sont écrites avec 3 décimales.
+export function downloadCSV(filename, headers, rows) {
+  const cell = (v) => {
+    if (typeof v === 'number') return v.toFixed(3).replace('.', ',');
+    const s = String(v ?? '');
+    return /[";\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = [headers, ...rows].map((r) => r.map(cell).join(';')).join('\r\n');
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  const safe = filename.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_-]+/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  a.download = `${safe}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
 // Logo adapté au thème (clair / sombre).

@@ -63,10 +63,22 @@ export async function processDocument(doc) {
   const built = buildEntries(extracted, company, rules);
   const { entries, warnings, summary } = built;
   let { needsReview } = built;
-  const duplicateOf = await findDuplicate(doc, extracted);
+  // Document déjà importé (même facture ou même relevé) : aucune écriture n'est
+  // passée, sauf si l'utilisateur a confirmé que ce n'est pas un doublon.
+  const duplicateOf = doc.allow_duplicate ? null : await findDuplicate(doc, extracted);
   if (duplicateOf) {
-    warnings.unshift(`Doublon probable : cette facture a déjà été scannée (document n° ${duplicateOf}). Supprimez l'un des deux.`);
-    needsReview = true;
+    await withTransaction(async (client) => {
+      await client.query('DELETE FROM entries WHERE document_id = $1', [doc.id]);
+      await client.query(
+        `UPDATE documents SET status = 'duplicate', duplicate_of = $2, doc_type = $3, extracted = $4, summary = $5,
+                warnings = $6, processed_at = now(), error = NULL
+          WHERE id = $1`,
+        [doc.id, duplicateOf, extracted.doc_type, JSON.stringify(extracted), summary,
+          JSON.stringify([`Ce document a déjà été importé (document n° ${duplicateOf}) : il n'a pas été comptabilisé une deuxième fois.`])]
+      );
+    });
+    await afterChange(doc.company_id);
+    return;
   }
   const docStatus = needsReview ? 'review' : 'done';
   const entryStatus = needsReview ? 'draft' : 'validated';

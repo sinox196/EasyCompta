@@ -230,14 +230,30 @@ export async function runControls(companyId, year) {
 
 // Doublon d'une facture au moment de sa lecture.
 export async function findDuplicate(doc, extracted) {
+  if (extracted?.doc_type === 'releve_bancaire') {
+    // Même relevé : même compte bancaire, même période et mêmes soldes.
+    const b = extracted.bank || {};
+    if (!b.period_start && !b.period_end) return null;
+    const { rows } = await query(
+      `SELECT id FROM documents
+        WHERE company_id = $1 AND id <> $2 AND status IN ('done', 'review') AND doc_type = 'releve_bancaire'
+          AND COALESCE(extracted->'bank'->>'account_number', '') = $3
+          AND COALESCE(extracted->'bank'->>'period_start', '') = $4
+          AND COALESCE(extracted->'bank'->>'period_end', '') = $5
+          AND COALESCE((extracted->'bank'->>'closing_balance')::numeric, 0) = $6::numeric
+        ORDER BY id LIMIT 1`,
+      [doc.company_id, doc.id, b.account_number || '', b.period_start || '', b.period_end || '', Number(b.closing_balance) || 0]
+    );
+    return rows[0]?.id || null;
+  }
   const inv = extracted?.invoice;
-  if (!inv?.number || extracted.doc_type === 'releve_bancaire') return null;
+  if (!inv?.number) return null;
   const { rows } = await query(
     `SELECT id FROM documents
       WHERE company_id = $1 AND id <> $2 AND status IN ('done', 'review')
         AND extracted->'invoice'->>'number' = $3
         AND (extracted->'invoice'->>'total_ttc')::numeric = $4::numeric
-      LIMIT 1`,
+      ORDER BY id LIMIT 1`,
     [doc.company_id, doc.id, inv.number, Number(inv.total_ttc) || 0]
   );
   return rows[0]?.id || null;

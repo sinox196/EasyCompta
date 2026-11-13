@@ -1,4 +1,4 @@
-import { api, esc, money, fmtDate, fmtDateTime, badge, toast, compressImage, uploadWithProgress, DOC_TYPE_LABELS, logo, countUp } from './common.js';
+import { api, esc, money, fmtDate, fmtDateTime, badge, toast, compressImage, uploadWithProgress, DOC_TYPE_LABELS, STATUS_LABELS as STATUS_TEXT, logo, countUp, downloadCSV } from './common.js';
 
 const root = document.getElementById('root');
 const state = { user: null, companies: [], companyId: null, plan: null };
@@ -315,8 +315,11 @@ function bindUpload(after) {
     form.append('type_hint', main().querySelector('#type-hint').value);
     form.append('mode', 'separate');
     try {
-      await uploadWithProgress(`/companies/${state.companyId}/documents`, form, (p) => (status.textContent = `Envoi… ${Math.round(p * 100)} %`));
-      toast(`${files.length} document(s) envoyé(s). L'IA s'en occupe.`);
+      const res = await uploadWithProgress(`/companies/${state.companyId}/documents`, form, (p) => (status.textContent = `Envoi… ${Math.round(p * 100)} %`));
+      const dup = res.duplicates?.length || 0;
+      status.textContent = dup ? `Déjà importé(s), ignoré(s) : ${res.duplicates.map((d) => d.name).join(', ')}` : '';
+      if (res.ids.length) toast(`${res.ids.length} document(s) envoyé(s). L'IA s'en occupe.${dup ? ` ${dup} doublon(s) ignoré(s).` : ''}`);
+      else toast(dup > 1 ? 'Ces documents ont déjà été importés.' : 'Ce document a déjà été importé.', 'error');
       after();
     } catch (err) {
       status.textContent = err.message;
@@ -373,9 +376,9 @@ let docFilter = '';
 async function viewDocuments() {
   const c = company();
   const { documents } = await api(`/companies/${c.id}/documents?limit=300${docFilter ? `&status=${docFilter}` : ''}`);
-  const filters = [['', 'Tous'], ['review', 'À vérifier'], ['pending', 'En attente'], ['processing', 'En cours'], ['done', 'Comptabilisés'], ['error', 'Erreurs']];
+  const filters = [['', 'Tous'], ['review', 'À vérifier'], ['pending', 'En attente'], ['processing', 'En cours'], ['done', 'Comptabilisés'], ['duplicate', 'Doublons'], ['error', 'Erreurs']];
   main().innerHTML = `
-    <div class="page-head"><h1>Documents</h1></div>
+    <div class="page-head"><h1>Documents</h1><span class="spacer"></span><button id="docs-export">⬇ Exporter la liste</button></div>
     ${uploadCard()}
     <div class="card" style="margin-top:16px">
       <div class="row" style="margin-bottom:10px">${filters.map(([v, l]) => `<button class="${docFilter === v ? 'primary' : ''}" data-filter="${v}">${l}</button>`).join('')}
@@ -385,6 +388,10 @@ async function viewDocuments() {
   main().querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => { docFilter = b.dataset.filter; viewDocuments(); }));
   bindUpload(() => viewDocuments());
   bindDocRows();
+  main().querySelector('#docs-export').addEventListener('click', () => {
+    downloadCSV(`documents-${c.name}`, ['N°', 'Reçu le', 'Source', 'Type', 'Document', 'Statut', 'Erreur'],
+      documents.map((d) => [d.id, fmtDateTime(d.created_at), d.source === 'mobile' ? 'Téléphone' : 'Web', DOC_TYPE_LABELS[d.doc_type] || '', d.summary || d.original_name, STATUS_TEXT[d.status] || d.status, d.error || '']));
+  });
   main().querySelector('#retry-errors')?.addEventListener('click', async () => {
     const { count } = await api(`/companies/${c.id}/documents/retry-errors`, { method: 'POST' });
     toast(`${count} document(s) renvoyé(s) à l'IA`);
@@ -418,6 +425,9 @@ async function viewDocument(id) {
       <div class="card preview">${preview}</div>
       <div>
         ${doc.status === 'pending' || doc.status === 'processing' ? '<div class="alert info">L\'IA lit ce document… la page se met à jour toute seule.</div>' : ''}
+        ${doc.status === 'duplicate' ? `<div class="alert warn"><b>Document déjà importé.</b> Il n'a pas été comptabilisé une deuxième fois.
+          <div class="row" style="margin-top:8px">${doc.duplicate_of ? `<a class="btn small" href="#/documents/${doc.duplicate_of}">Voir l'original (n° ${doc.duplicate_of})</a>` : ''}
+          <button class="small" id="not-duplicate">Ce n'est pas un doublon : comptabiliser</button></div></div>` : ''}
         ${doc.error ? `<div class="alert ${doc.status === 'pending' ? 'info' : 'error'}">${doc.status === 'pending' ? '⏳ Nouvel essai automatique dans quelques minutes : ' : ''}${esc(doc.error)}</div>` : ''}
         ${notes.map((n) => `<div class="alert info">${esc(n)}</div>`).join('')}
         ${warnings.length ? `<div class="alert warn"><b>Points à vérifier</b><ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}
@@ -469,6 +479,11 @@ async function viewDocument(id) {
     await api(`/documents/${doc.id}/validate`, { method: 'POST' });
     toast('Écritures validées');
     refreshCompanyCounts();
+    viewDocument(id);
+  });
+  main().querySelector('#not-duplicate')?.addEventListener('click', async () => {
+    await api(`/documents/${doc.id}/not-duplicate`, { method: 'POST' });
+    toast('Le document va être comptabilisé');
     viewDocument(id);
   });
   main().querySelector('#reprocess').addEventListener('click', async () => {
@@ -613,66 +628,273 @@ async function viewJournal() {
   const c = company();
   const qs = `from=${period.from}&to=${period.to}${period.journal ? `&journal=${period.journal}` : ''}`;
   const { entries } = await api(`/companies/${c.id}/entries?${qs}`);
+  const q = (journalSearch || '').toLowerCase();
+  const shown = q
+    ? entries.filter((e) => [e.label, e.piece_ref, ...e.lines.flatMap((l) => [l.account, l.label, l.third_party])].join(' ').toLowerCase().includes(q))
+    : entries;
   let td = 0, tc = 0;
-  const rows = entries.map((e) => {
+  const rows = shown.map((e) => {
     const lines = e.lines.map((l) => {
       td += Number(l.debit); tc += Number(l.credit);
-      return `<tr><td></td><td class="mono">${esc(l.account)}</td><td>${esc(l.label)}<div class="small muted">${esc(l.account_label)}</div></td><td class="num">${Number(l.debit) ? money(l.debit) : ''}</td><td class="num">${Number(l.credit) ? money(l.credit) : ''}</td></tr>`;
+      return `<tr><td></td><td class="mono">${esc(l.account)}</td><td>${esc(l.label)}<div class="small muted">${esc(l.account_label)}${l.third_party ? ` · ${esc(l.third_party)}` : ''}</div></td><td class="num">${Number(l.debit) ? money(l.debit) : ''}</td><td class="num">${Number(l.credit) ? money(l.credit) : ''}</td></tr>`;
     }).join('');
-    return `<tr class="entry-head"><td>${fmtDate(e.entry_date)}</td><td>${e.journal}</td><td>${esc(e.label)} ${e.document_id ? `<a href="#/documents/${e.document_id}" class="small">pièce</a>` : ''}</td><td colspan="2" style="text-align:right">${badge(e.status)}</td></tr>${lines}`;
+    return `<tr class="entry-head"><td>${fmtDate(e.entry_date)}</td><td>${e.journal}</td><td>${esc(e.label)}${e.piece_ref ? ` <span class="muted small">· ${esc(e.piece_ref)}</span>` : ''} ${e.document_id ? `<a href="#/documents/${e.document_id}" class="small">pièce</a>` : '<span class="small muted">· saisie manuelle</span>'}</td>
+      <td colspan="2" style="text-align:right">${badge(e.status)} <button class="ghost small" data-edit="${e.id}" title="Modifier">✎ Modifier</button></td></tr>${lines}`;
   }).join('');
   main().innerHTML = `
     <div class="page-head"><h1>Écritures comptables</h1><span class="spacer"></span>
-      <a class="btn" href="/api/companies/${c.id}/export.csv?${qs}">⬇ Exporter (Excel / CSV)</a></div>
-    <div class="card" style="margin-bottom:14px">${periodForm(true)}</div>
+      <button class="primary" id="new-entry">＋ Nouvelle écriture</button>
+      <a class="btn" href="/api/companies/${c.id}/export.csv?${qs}">⬇ Exporter (Excel)</a></div>
+    <div class="card" style="margin-bottom:14px"><div class="filters">${periodForm(true)}
+      <div><label for="j-search">Rechercher</label><input type="search" id="j-search" placeholder="Libellé, compte, tiers, pièce…" value="${esc(journalSearch)}"></div></div></div>
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>Date</th><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="muted">Aucune écriture sur la période.</td></tr>'}</tbody>
-      <tfoot><tr><td colspan="3">Total (${entries.length} écritures)</td><td class="num">${money(td)}</td><td class="num">${money(tc)}</td></tr></tfoot>
+      <tfoot><tr><td colspan="3">Total (${shown.length} écritures)</td><td class="num">${money(td)}</td><td class="num">${money(tc)}</td></tr></tfoot>
     </table></div></div>`;
   bindPeriod(viewJournal);
+  const search = main().querySelector('#j-search');
+  search.addEventListener('change', () => { journalSearch = search.value; viewJournal(); });
+  main().querySelector('#new-entry').addEventListener('click', () => openEntryModal(null, viewJournal));
+  main().querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
+    openEntryModal(entries.find((e) => e.id === Number(b.dataset.edit)), viewJournal);
+  }));
+}
+let journalSearch = '';
+
+// Saisie manuelle (ou modification) d'une écriture, dans une fenêtre.
+function openEntryModal(entry, onSaved) {
+  const isNew = !entry;
+  const e = entry || {
+    journal: 'OD', entry_date: new Date().toISOString().slice(0, 10), label: '', piece_ref: '', status: 'draft',
+    lines: [{ account: '', label: '', debit: '', credit: '' }, { account: '', label: '', debit: '', credit: '' }],
+  };
+  const journals = state.plan.journals;
+  const lineRow = (l = {}) => `
+    <tr>
+      <td style="width:120px"><input class="mono" list="accounts" name="account" value="${esc(l.account)}" placeholder="ex. 626" aria-label="Compte"></td>
+      <td><input name="label" value="${esc(l.label)}" placeholder="Libellé" aria-label="Libellé"><div class="small muted acc-label">${esc(l.account_label || accountLabelOf(l.account || ''))}</div></td>
+      <td style="width:150px"><input name="third_party" value="${esc(l.third_party)}" placeholder="Tiers" aria-label="Tiers"></td>
+      <td style="width:120px"><input class="num" name="debit" inputmode="decimal" value="${Number(l.debit) ? Number(l.debit).toFixed(3) : ''}" aria-label="Débit"></td>
+      <td style="width:120px"><input class="num" name="credit" inputmode="decimal" value="${Number(l.credit) ? Number(l.credit).toFixed(3) : ''}" aria-label="Crédit"></td>
+      <td style="width:36px"><button type="button" class="ghost small" data-remove title="Supprimer la ligne">✕</button></td>
+    </tr>`;
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true" aria-label="${isNew ? 'Nouvelle écriture' : 'Modifier l\'écriture'}">
+      <header><h2>${isNew ? 'Nouvelle écriture' : 'Modifier l\'écriture'}</h2><span class="spacer"></span><button class="ghost" data-close aria-label="Fermer">✕</button></header>
+      <datalist id="accounts">${Object.entries(state.plan.accounts).map(([n, l]) => `<option value="${n}">${esc(l)}</option>`).join('')}</datalist>
+      <div class="entry-card">
+        <div class="head">
+          <select name="journal" aria-label="Journal">${Object.entries(journals).map(([k, l]) => `<option value="${k}" ${k === e.journal ? 'selected' : ''}>${k} — ${esc(l)}</option>`).join('')}</select>
+          <input type="date" name="entry_date" value="${esc(e.entry_date)}" aria-label="Date">
+          <input name="piece_ref" value="${esc(e.piece_ref)}" placeholder="N° pièce" style="width:130px" aria-label="Numéro de pièce">
+          <input name="label" value="${esc(e.label)}" placeholder="Libellé de l'écriture" style="flex:1;min-width:180px" aria-label="Libellé de l'écriture">
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Compte</th><th>Libellé</th><th>Tiers</th><th class="num">Débit</th><th class="num">Crédit</th><th></th></tr></thead>
+          <tbody>${e.lines.map(lineRow).join('')}</tbody>
+          <tfoot><tr><td></td><td class="balance-msg" colspan="2"></td><td class="num tot-d"></td><td class="num tot-c"></td><td></td></tr></tfoot>
+        </table></div>
+        <div class="foot">
+          <button type="button" class="ghost" data-add>＋ Ligne</button>
+          <button type="button" class="ghost" data-balance title="Mettre l'écart sur la dernière ligne">⇄ Équilibrer</button>
+          <span class="spacer"></span>
+          ${isNew ? '' : '<button type="button" class="danger ghost" data-delete>Supprimer</button>'}
+          <button type="button" data-close>Annuler</button>
+          <button type="button" class="primary" data-save>${isNew ? 'Enregistrer l\'écriture' : 'Enregistrer'}</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const tbody = wrap.querySelector('tbody');
+  const parse = (v) => Math.round(parseFloat(String(v || '0').replace(/\s/g, '').replace(',', '.')) * 1000) || 0;
+  const totals = () => {
+    let d = 0, c = 0;
+    tbody.querySelectorAll('tr').forEach((tr) => { d += parse(tr.querySelector('[name=debit]').value); c += parse(tr.querySelector('[name=credit]').value); });
+    return { d, c };
+  };
+  const recompute = () => {
+    const { d, c } = totals();
+    wrap.querySelector('.tot-d').textContent = money(d / 1000);
+    wrap.querySelector('.tot-c').textContent = money(c / 1000);
+    const msg = wrap.querySelector('.balance-msg');
+    msg.textContent = d === c && d > 0 ? '✓ Équilibrée' : `Écart : ${money((d - c) / 1000)}`;
+    msg.style.color = d === c && d > 0 ? 'var(--ok)' : 'var(--danger)';
+  };
+  const bindRow = (tr) => {
+    tr.querySelector('[data-remove]').addEventListener('click', () => { tr.remove(); recompute(); });
+    tr.querySelectorAll('input').forEach((i) => i.addEventListener('input', recompute));
+    tr.querySelector('[name=account]').addEventListener('input', (ev) => { tr.querySelector('.acc-label').textContent = accountLabelOf(ev.target.value); });
+  };
+  tbody.querySelectorAll('tr').forEach(bindRow);
+  const close = () => wrap.remove();
+  wrap.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', close));
+  wrap.addEventListener('click', (ev) => { if (ev.target === wrap) close(); });
+  document.addEventListener('keydown', function esc(ev) { if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', esc); } });
+  wrap.querySelector('[data-add]').addEventListener('click', () => {
+    tbody.insertAdjacentHTML('beforeend', lineRow());
+    bindRow(tbody.lastElementChild);
+    tbody.lastElementChild.querySelector('[name=account]').focus();
+  });
+  wrap.querySelector('[data-balance]').addEventListener('click', () => {
+    const { d, c } = totals();
+    const last = [...tbody.querySelectorAll('tr')].pop();
+    if (!last || d === c) return;
+    const field = d > c ? 'credit' : 'debit';
+    const input = last.querySelector(`[name=${field}]`);
+    input.value = ((parse(input.value) + Math.abs(d - c)) / 1000).toFixed(3);
+    recompute();
+  });
+  wrap.querySelector('[data-delete]')?.addEventListener('click', async () => {
+    if (!confirm('Supprimer cette écriture ?')) return;
+    await api(`/entries/${e.id}`, { method: 'DELETE' });
+    toast('Écriture supprimée');
+    close();
+    onSaved?.();
+  });
+  wrap.querySelector('[data-save]').addEventListener('click', async () => {
+    const lines = [...tbody.querySelectorAll('tr')].map((tr) => ({
+      account: tr.querySelector('[name=account]').value.trim(),
+      label: tr.querySelector('[name=label]').value,
+      third_party: tr.querySelector('[name=third_party]').value,
+      account_label: tr.querySelector('.acc-label').textContent,
+      debit: tr.querySelector('[name=debit]').value.replace(',', '.'),
+      credit: tr.querySelector('[name=credit]').value.replace(',', '.'),
+    })).filter((l) => l.account || Number(l.debit) || Number(l.credit));
+    const body = {
+      journal: wrap.querySelector('[name=journal]').value,
+      entry_date: wrap.querySelector('[name=entry_date]').value,
+      piece_ref: wrap.querySelector('.head [name=piece_ref]').value,
+      label: wrap.querySelector('.head [name=label]').value,
+      lines,
+      validate: true,
+    };
+    try {
+      if (isNew) await api(`/companies/${state.companyId}/entries`, { method: 'POST', body });
+      else await api(`/entries/${e.id}`, { method: 'PUT', body });
+      toast(isNew ? 'Écriture enregistrée' : 'Écriture modifiée');
+      close();
+      onSaved?.();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+  recompute();
+  wrap.querySelector(isNew ? '.head [name=label]' : '[data-save]').focus();
 }
 
 // --- Balance & grand livre -----------------------------------------------------
 
+const balanceFilter = { account: '', label: '', cls: '' };
 async function viewBalance() {
   await loadPlan();
   const c = company();
   const { accounts } = await api(`/companies/${c.id}/balance?from=${period.from}&to=${period.to}`);
-  let td = 0, tc = 0;
-  const rows = accounts.map((a) => {
-    const d = Number(a.debit), cr = Number(a.credit);
-    td += d; tc += cr;
-    const solde = d - cr;
-    return `<tr class="clickable" data-acc="${esc(a.account)}"><td class="mono">${esc(a.account)}</td><td>${esc(accountLabelOf(a.account) || a.account_label)}</td><td class="num">${money(d)}</td><td class="num">${money(cr)}</td><td class="num">${solde > 0 ? money(solde) : ''}</td><td class="num">${solde < 0 ? money(-solde) : ''}</td></tr>`;
-  }).join('');
+  const all = accounts.map((a) => ({ ...a, label: accountLabelOf(a.account) || a.account_label || '' }));
+  const render = () => {
+    const f = balanceFilter;
+    const list = all.filter((a) => (!f.cls || a.account.startsWith(f.cls))
+      && (!f.account || a.account.startsWith(f.account.trim()))
+      && (!f.label || a.label.toLowerCase().includes(f.label.toLowerCase())));
+    let td = 0, tc = 0, sd = 0, sc = 0;
+    const rows = list.map((a) => {
+      const d = Number(a.debit), cr = Number(a.credit);
+      td += d; tc += cr;
+      const solde = d - cr;
+      if (solde > 0) sd += solde; else sc -= solde;
+      return `<tr class="clickable" data-acc="${esc(a.account)}"><td class="mono">${esc(a.account)}</td><td>${esc(a.label)}</td><td class="num">${money(d)}</td><td class="num">${money(cr)}</td><td class="num">${solde > 0 ? money(solde) : ''}</td><td class="num">${solde < 0 ? money(-solde) : ''}</td></tr>`;
+    }).join('');
+    main().querySelector('#bal-body').innerHTML = rows || '<tr><td colspan="6" class="muted">Aucun compte ne correspond.</td></tr>';
+    main().querySelector('#bal-foot').innerHTML = `<tr><td colspan="2">Total (${list.length} comptes)</td><td class="num">${money(td)}</td><td class="num">${money(tc)}</td><td class="num">${money(sd)}</td><td class="num">${money(sc)}</td></tr>`;
+    main().querySelectorAll('[data-acc]').forEach((tr) => tr.addEventListener('click', () => (location.hash = `#/ledger/${tr.dataset.acc}`)));
+    main().querySelectorAll('[data-cls]').forEach((b) => b.classList.toggle('active', b.dataset.cls === f.cls));
+    return list;
+  };
+  const classes = [['', 'Toutes'], ['1', '1 Capitaux'], ['2', '2 Immobilisations'], ['3', '3 Stocks'], ['4', '4 Tiers'], ['5', '5 Trésorerie'], ['6', '6 Charges'], ['7', '7 Produits']];
+  const balanced = Math.round(all.reduce((s, a) => s + Number(a.debit) - Number(a.credit), 0) * 1000) === 0;
   main().innerHTML = `
-    <div class="page-head"><h1>Balance générale</h1></div>
-    <div class="card" style="margin-bottom:14px">${periodForm(false)}<p class="small muted" style="margin:8px 0 0">Cliquez sur un compte pour voir son grand livre (le détail des mouvements).</p></div>
+    <div class="page-head"><h1>Balance générale</h1>${all.length ? `<span class="badge ${balanced ? 'done' : 'error'}">${balanced ? 'équilibrée' : 'déséquilibrée'}</span>` : ''}
+      <span class="spacer"></span><a class="btn" href="#/ledger">Grand livre complet</a><button id="bal-export">⬇ Exporter (Excel)</button></div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="filters">${periodForm(false)}
+        <div><label for="f-acc">Compte</label><input id="f-acc" class="mono" placeholder="ex. 401" value="${esc(balanceFilter.account)}" inputmode="numeric"></div>
+        <div><label for="f-lab">Intitulé</label><input type="search" id="f-lab" placeholder="ex. fournisseurs" value="${esc(balanceFilter.label)}"></div>
+      </div>
+      <div class="chip-filter" style="margin-top:12px">${classes.map(([k, l]) => `<button class="small" data-cls="${k}">${l}</button>`).join('')}</div>
+      <p class="small muted" style="margin:10px 0 0">Cliquez sur un compte pour voir son grand livre (le détail des mouvements).</p>
+    </div>
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>Compte</th><th>Intitulé</th><th class="num">Débit</th><th class="num">Crédit</th><th class="num">Solde débiteur</th><th class="num">Solde créditeur</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6" class="muted">Aucune écriture.</td></tr>'}</tbody>
-      <tfoot><tr><td colspan="2">Total</td><td class="num">${money(td)}</td><td class="num">${money(tc)}</td><td colspan="2" class="num">${Math.round(td * 1000) === Math.round(tc * 1000) ? '✓ équilibrée' : '⚠ déséquilibrée'}</td></tr></tfoot>
+      <tbody id="bal-body"></tbody><tfoot id="bal-foot"></tfoot>
     </table></div></div>`;
   bindPeriod(viewBalance);
-  main().querySelectorAll('[data-acc]').forEach((tr) => tr.addEventListener('click', () => (location.hash = `#/ledger/${tr.dataset.acc}`)));
+  let shown = render();
+  main().querySelector('#f-acc').addEventListener('input', (ev) => { balanceFilter.account = ev.target.value; shown = render(); });
+  main().querySelector('#f-lab').addEventListener('input', (ev) => { balanceFilter.label = ev.target.value; shown = render(); });
+  main().querySelectorAll('[data-cls]').forEach((b) => b.addEventListener('click', () => { balanceFilter.cls = b.dataset.cls; shown = render(); }));
+  main().querySelector('#bal-export').addEventListener('click', () => {
+    downloadCSV(`balance-${c.name}-${period.from}-${period.to}`, ['Compte', 'Intitulé', 'Débit', 'Crédit', 'Solde débiteur', 'Solde créditeur'],
+      shown.map((a) => { const so = Number(a.debit) - Number(a.credit); return [a.account, a.label, Number(a.debit), Number(a.credit), so > 0 ? so : 0, so < 0 ? -so : 0]; }));
+  });
 }
 
-async function viewLedger(account) {
+const ledgerFilter = { q: '', side: '' };
+async function viewLedger(account = '') {
   await loadPlan();
   const c = company();
   const { lines } = await api(`/companies/${c.id}/ledger?account=${encodeURIComponent(account)}&from=${period.from}&to=${period.to}`);
-  let solde = 0;
-  const rows = lines.map((l) => {
-    solde += Number(l.debit) - Number(l.credit);
-    return `<tr><td>${fmtDate(l.entry_date)}</td><td>${l.journal}</td><td>${esc(l.label)}${l.third_party ? `<div class="small muted">${esc(l.third_party)}</div>` : ''}</td><td class="num">${Number(l.debit) ? money(l.debit) : ''}</td><td class="num">${Number(l.credit) ? money(l.credit) : ''}</td><td class="num">${money(solde)}</td><td>${l.document_id ? `<a href="#/documents/${l.document_id}" class="small">pièce</a>` : ''}</td></tr>`;
-  }).join('');
+  const render = () => {
+    const q = ledgerFilter.q.toLowerCase();
+    const list = lines.filter((l) => (!q || [l.label, l.third_party, l.piece_ref, l.account].join(' ').toLowerCase().includes(q))
+      && (!ledgerFilter.side || (ledgerFilter.side === 'd' ? Number(l.debit) > 0 : Number(l.credit) > 0)));
+    // Regroupement par compte, avec solde progressif et sous-total.
+    const groups = new Map();
+    for (const l of list) (groups.get(l.account) || groups.set(l.account, []).get(l.account)).push(l);
+    let td = 0, tc = 0;
+    const html = [...groups.entries()].map(([acc, ls]) => {
+      let solde = 0, gd = 0, gc = 0;
+      const rows = ls.map((l) => {
+        const d = Number(l.debit), cr = Number(l.credit);
+        solde += d - cr; gd += d; gc += cr;
+        return `<tr><td>${fmtDate(l.entry_date)}</td><td>${l.journal}</td><td class="small">${esc(l.piece_ref)}</td><td>${esc(l.label)}${l.third_party ? `<div class="small muted">${esc(l.third_party)}</div>` : ''}</td><td class="num">${d ? money(d) : ''}</td><td class="num">${cr ? money(cr) : ''}</td><td class="num">${money(solde)}</td><td>${l.document_id ? `<a href="#/documents/${l.document_id}" class="small">pièce</a>` : ''}</td></tr>`;
+      }).join('');
+      td += gd; tc += gc;
+      return `<tr class="entry-head"><td colspan="8"><a href="#/ledger/${esc(acc)}" class="mono">${esc(acc)}</a> — ${esc(accountLabelOf(acc) || ls[0].account_label)}</td></tr>${rows}
+        <tr class="subtotal"><td colspan="4">Total ${esc(acc)}</td><td class="num">${money(gd)}</td><td class="num">${money(gc)}</td><td class="num">${money(gd - gc)}</td><td></td></tr>`;
+    }).join('');
+    main().querySelector('#gl-body').innerHTML = html || '<tr><td colspan="8" class="muted">Aucun mouvement.</td></tr>';
+    main().querySelector('#gl-foot').innerHTML = `<tr><td colspan="4">Total général (${list.length} lignes)</td><td class="num">${money(td)}</td><td class="num">${money(tc)}</td><td class="num">${money(td - tc)}</td><td></td></tr>`;
+    main().querySelectorAll('[data-side]').forEach((b) => b.classList.toggle('active', b.dataset.side === ledgerFilter.side));
+    return list;
+  };
+  const title = account ? `${account} ${accountLabelOf(account)}` : 'tous les comptes';
   main().innerHTML = `
-    <div class="page-head"><a class="btn" href="#/balance">← Balance</a><h1>Grand livre — ${esc(account)} ${esc(accountLabelOf(account))}</h1></div>
+    <div class="page-head"><a class="btn" href="#/balance">← Balance</a><h1>Grand livre — ${esc(title)}</h1><span class="spacer"></span><button id="gl-export">⬇ Exporter (Excel)</button></div>
+    <datalist id="accounts">${Object.entries(state.plan.accounts).map(([n, l]) => `<option value="${n}">${esc(l)}</option>`).join('')}</datalist>
+    <div class="card" style="margin-bottom:14px">
+      <div class="filters">${periodForm(false)}
+        <div><label for="gl-acc">Compte (ou début de compte)</label><input id="gl-acc" class="mono" list="accounts" placeholder="ex. 401, 6…" value="${esc(account)}"></div>
+        <div><label for="gl-q">Rechercher</label><input type="search" id="gl-q" placeholder="Libellé, tiers, pièce…" value="${esc(ledgerFilter.q)}"></div>
+        <div class="chip-filter">${[['', 'Tous'], ['d', 'Débits'], ['c', 'Crédits']].map(([k, l]) => `<button class="small" data-side="${k}">${l}</button>`).join('')}</div>
+      </div>
+    </div>
     <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Date</th><th>Jnl</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th><th class="num">Solde</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="7" class="muted">Aucun mouvement.</td></tr>'}</tbody>
+      <thead><tr><th>Date</th><th>Jnl</th><th>Pièce</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th><th class="num">Solde</th><th></th></tr></thead>
+      <tbody id="gl-body"></tbody><tfoot id="gl-foot"></tfoot>
     </table></div></div>`;
+  bindPeriod(() => viewLedger(account));
+  let shown = render();
+  const acc = main().querySelector('#gl-acc');
+  acc.addEventListener('change', () => { location.hash = acc.value.trim() ? `#/ledger/${encodeURIComponent(acc.value.trim())}` : '#/ledger'; });
+  main().querySelector('#gl-q').addEventListener('input', (ev) => { ledgerFilter.q = ev.target.value; shown = render(); });
+  main().querySelectorAll('[data-side]').forEach((b) => b.addEventListener('click', () => { ledgerFilter.side = b.dataset.side; shown = render(); }));
+  main().querySelector('#gl-export').addEventListener('click', () => {
+    downloadCSV(`grand-livre-${c.name}-${account || 'tous'}-${period.from}-${period.to}`,
+      ['Compte', 'Intitulé compte', 'Date', 'Journal', 'Pièce', 'Libellé', 'Tiers', 'Débit', 'Crédit'],
+      shown.map((l) => [l.account, accountLabelOf(l.account) || l.account_label, l.entry_date, l.journal, l.piece_ref, l.label, l.third_party, Number(l.debit), Number(l.credit)]));
+  });
 }
 
 // --- TVA -----------------------------------------------------------------------
@@ -691,6 +913,7 @@ async function viewTva() {
   }).join('');
   main().innerHTML = `
     <div class="page-head"><h1>TVA mensuelle</h1>
+      <button id="tva-export" style="order:3">⬇ Exporter (Excel)</button>
       <select id="tva-year" style="width:auto">${[0, 1, 2, 3].map((i) => new Date().getFullYear() - i).map((y) => `<option ${y === tvaYear ? 'selected' : ''}>${y}</option>`).join('')}</select></div>
     <div class="alert info">En Tunisie, la TVA se déclare chaque mois (avant le 28 du mois suivant pour les sociétés). <b>TVA à payer</b> = TVA collectée sur vos ventes − TVA déductible sur vos achats. Si le résultat est négatif, c'est un crédit de TVA reporté sur le mois suivant. Montants indicatifs, à faire valider avant déclaration.</div>
     <div class="card"><div class="table-wrap"><table>
@@ -698,6 +921,14 @@ async function viewTva() {
       <tbody>${rows || '<tr><td colspan="6" class="muted">Aucune donnée pour cette année.</td></tr>'}</tbody>
     </table></div></div>`;
   main().querySelector('#tva-year').addEventListener('change', (e) => { tvaYear = Number(e.target.value); viewTva(); });
+  main().querySelector('#tva-export').addEventListener('click', () => {
+    let cr = 0;
+    downloadCSV(`tva-${c.name}-${tvaYear}`, ['Mois', 'CA HT', 'TVA collectée', 'TVA déductible', 'TVA à payer', 'Crédit reporté'], months.map((m) => {
+      const net = Number(m.collectee) - Number(m.deductible) - cr;
+      cr = net < 0 ? -net : 0;
+      return [m.month, Number(m.chiffre_affaires), Number(m.collectee), Number(m.deductible), net > 0 ? net : 0, cr];
+    }));
+  });
 }
 
 // --- Déclaration mensuelle -----------------------------------------------------
@@ -718,7 +949,7 @@ async function viewDeclaration() {
   main().innerHTML = `
     <div class="page-head no-print"><h1>Déclaration fiscale mensuelle</h1>
       <input type="month" id="decl-month" value="${d.month}" style="width:auto">
-      <span class="spacer"></span><button id="print">🖨 Imprimer / PDF</button></div>
+      <span class="spacer"></span><button id="decl-export">⬇ Exporter (Excel)</button><button id="print">🖨 Imprimer / PDF</button></div>
     <div class="alert info no-print">Chaque mois, la société déclare et paie les impôts du mois précédent : la TVA, les retenues à la source, le droit de timbre, le FODEC et la TCL. Pour une société, la date limite est le <b>28 du mois suivant</b> (le 15 pour une personne physique). EasyCompta prépare les montants à partir des documents scannés. Vous les reportez ensuite sur le portail de déclaration en ligne du ministère des Finances, ou vous les transmettez à votre comptable.</div>
     ${d.drafts ? `<div class="alert warn no-print">${d.drafts} écriture(s) de ce mois sont encore « À vérifier » : validez-les avant de déclarer. <a href="#/documents">Voir les documents</a></div>` : ''}
     ${d.sales_documents === 0 && Number(d.chiffreAffairesHt) > 0 ? '<div class="alert warn no-print">Des ventes ont été saisies sans facture scannée : le timbre et le FODEC collectés ne sont peut-être pas complets.</div>' : ''}
@@ -765,6 +996,18 @@ async function viewDeclaration() {
       <p class="small muted" style="margin-top:16px">Ces montants sont indicatifs et calculés automatiquement à partir des écritures. Les charges sur salaires (retenues sur salaires, TFP, FOPROLOS) ne sont pas encore calculées. Faites vérifier la déclaration avant de la déposer.</p>
     </div>`;
   main().querySelector('#decl-month').addEventListener('change', (e) => { if (e.target.value) { declMonth = e.target.value; viewDeclaration(); } });
+  main().querySelector('#decl-export').addEventListener('click', () => {
+    downloadCSV(`declaration-${c.name}-${d.month}`, ['Rubrique', 'Base', 'Montant'], [
+      ['Chiffre d\'affaires HT', '', Number(d.chiffreAffairesHt)],
+      ['TVA collectée', '', Number(d.tva.collectee)],
+      ['TVA déductible', '', Number(d.tva.deductible)],
+      ['Crédit de TVA reporté', '', Number(d.tva.creditReporte)],
+      ['Crédit de TVA à reporter', '', Number(d.tva.creditAReporter)],
+      ...d.lines.map((l) => [l.label, l.base === null ? '' : Number(l.base), Number(l.amount)]),
+      ['Total à payer', '', Number(d.total)],
+      ['Date limite de dépôt', '', d.deadline],
+    ]);
+  });
   main().querySelector('#print').addEventListener('click', () => window.print());
 }
 
@@ -951,7 +1194,7 @@ async function viewEcheancier() {
   for (const l of lines) if (l.lettrage) (groups[l.lettrage] ||= []).push(l);
   const lettered = Object.entries(groups);
   main().innerHTML = `
-    <div class="page-head"><h1>Échéancier & lettrage</h1><span class="spacer"></span><button class="primary" id="auto-lettrage">↻ Lettrage automatique</button></div>
+    <div class="page-head"><h1>Échéancier & lettrage</h1><span class="spacer"></span><button id="ech-export">⬇ Exporter (Excel)</button><button class="primary" id="auto-lettrage">↻ Lettrage automatique</button></div>
     <p class="muted">Le <b>lettrage</b> relie chaque facture à son paiement trouvé dans les relevés bancaires. Il se fait tout seul après chaque document scanné. Ce qui reste non lettré est encore dû.</p>
     <div class="grid-2">
       ${section('a_encaisser', 'À encaisser (clients)', 'Factures de vente dont le paiement n\'apparaît pas encore sur un relevé.')}
@@ -965,6 +1208,10 @@ async function viewEcheancier() {
           <td>${i === 0 ? `<button class="ghost small" data-unletter="${esc(code)}">Défaire</button>` : ''}</td></tr>`).join('')).join('')}
       </tbody></table></div>` : '<p class="muted">Aucun rapprochement pour l\'instant : scannez vos relevés bancaires.</p>'}
     </div>`;
+  main().querySelector('#ech-export').addEventListener('click', () => {
+    downloadCSV(`echeancier-${c.name}`, ['Type', 'Tiers', 'Pièce', 'Date', 'Échéance', 'Jours de retard', 'Montant'],
+      items.map((i) => [i.type === 'a_encaisser' ? 'À encaisser' : 'À payer', i.partner, i.piece_ref, i.date, i.due_date, i.days_late, Number(i.amount)]));
+  });
   main().querySelector('#auto-lettrage').addEventListener('click', async () => {
     const { matched } = await api(`/companies/${c.id}/lettrage/auto`, { method: 'POST' });
     toast(matched ? `${matched} rapprochement(s) trouvé(s)` : 'Aucun nouveau rapprochement');
@@ -984,7 +1231,7 @@ async function viewEtats() {
   const rows = (ls) => ls.map((l) => `<tr><td>${esc(l.label)}</td><td class="num">${money(l.amount)}</td></tr>`).join('');
   const net = Number(d.resultat.net);
   main().innerHTML = `
-    <div class="page-head no-print"><h1>Bilan & état de résultat</h1>${yearSelect('etats-year', etatsYear)}<span class="spacer"></span><button id="print">🖨 Imprimer / PDF</button></div>
+    <div class="page-head no-print"><h1>Bilan & état de résultat</h1>${yearSelect('etats-year', etatsYear)}<span class="spacer"></span><button id="etats-export">⬇ Exporter (Excel)</button><button id="print">🖨 Imprimer / PDF</button></div>
     <p class="muted no-print">Calculés automatiquement à partir de toutes les écritures. Le <b>résultat</b> dit si la société gagne ou perd de l'argent sur l'année ; le <b>bilan</b> montre ce qu'elle possède (actif) et ce qu'elle doit (passif) au 31/12. Version simplifiée, indicative : les états officiels de fin d'année restent à établir avec l'expert-comptable.</p>
     <div class="card" style="margin-bottom:16px">
       <h2>État de résultat ${d.year} — ${esc(company().name)}</h2>
@@ -998,6 +1245,17 @@ async function viewEtats() {
     </div>
     ${Math.round(Number(d.bilan.totalActif) * 1000) === Math.round(Number(d.bilan.totalPassif) * 1000) ? '<p class="small" style="color:var(--ok)">✓ Bilan équilibré</p>' : '<p class="small" style="color:var(--danger)">⚠ Bilan déséquilibré : vérifiez les écritures</p>'}`;
   main().querySelector('#etats-year').addEventListener('change', (e) => { etatsYear = Number(e.target.value); viewEtats(); });
+  main().querySelector('#etats-export').addEventListener('click', () => {
+    downloadCSV(`etats-financiers-${company().name}-${d.year}`, ['État', 'Rubrique', 'Montant'], [
+      ...d.resultat.lines.map((l) => ['Résultat', l.label, Number(l.amount)]),
+      ['Résultat', 'Résultat d\'exploitation', Number(d.resultat.exploitation)],
+      ['Résultat', 'Résultat net', Number(d.resultat.net)],
+      ...d.bilan.actif.map((l) => ['Bilan - actif', l.label, Number(l.amount)]),
+      ['Bilan - actif', 'Total actif', Number(d.bilan.totalActif)],
+      ...d.bilan.passif.map((l) => ['Bilan - passif', l.label, Number(l.amount)]),
+      ['Bilan - passif', 'Total passif', Number(d.bilan.totalPassif)],
+    ]);
+  });
   main().querySelector('#print').addEventListener('click', () => window.print());
 }
 
@@ -1010,6 +1268,7 @@ async function viewImmobilisations() {
   const total = (k) => items.reduce((s, i) => s + Number(i[k]), 0);
   main().innerHTML = `
     <div class="page-head"><h1>Immobilisations</h1>${yearSelect('immo-year', immoYear)}<span class="spacer"></span>
+      ${items.length ? '<button id="immo-export">⬇ Exporter (Excel)</button>' : ''}
       ${items.length ? `<button class="primary" id="dotations">Passer les dotations ${immoYear}</button>` : ''}</div>
     <p class="muted">Quand l'IA lit l'achat d'un bien durable (ordinateur, véhicule, mobilier, machine, logiciel), il est ajouté ici automatiquement. Son coût est réparti sur plusieurs années : c'est l'<b>amortissement</b>. Le taux proposé est le taux usuel ; modifiez-le si votre comptable le demande.</p>
     <div class="card"><div class="table-wrap"><table>
@@ -1023,6 +1282,10 @@ async function viewImmobilisations() {
       ${items.length ? `<tfoot><tr><td colspan="3">Total</td><td class="num">${money(total('value'))}</td><td></td><td class="num">${money(total('cumul_avant'))}</td><td class="num">${money(total('dotation'))}</td><td class="num">${money(total('vnc'))}</td></tr></tfoot>` : ''}
     </table></div></div>`;
   main().querySelector('#immo-year').addEventListener('change', (e) => { immoYear = Number(e.target.value); viewImmobilisations(); });
+  main().querySelector('#immo-export')?.addEventListener('click', () => {
+    downloadCSV(`immobilisations-${c.name}-${immoYear}`, ['Bien', 'Compte', 'Intitulé', 'Acquis le', 'Valeur', 'Taux %', `Amorti avant ${immoYear}`, `Dotation ${immoYear}`, 'Valeur restante'],
+      items.map((i) => [i.label, i.account, i.account_label, i.acquisition_date, Number(i.value), String(Number(i.rate)).replace('.', ','), Number(i.cumul_avant), Number(i.dotation), Number(i.vnc)]));
+  });
   main().querySelectorAll('[data-rate]').forEach((inp) => inp.addEventListener('change', async () => {
     try {
       await api(`/companies/${c.id}/immobilisations/${inp.dataset.rate}`, { method: 'PUT', body: { rate: inp.value.replace(',', '.') } });
