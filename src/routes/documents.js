@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { query, withTransaction } from '../db.js';
 import { requireAuth, loadCompany } from '../auth.js';
 import { kickWorker, afterChange } from '../worker.js';
+import { ensurePlan } from '../accounting/plan.js';
 import { aiConfigured } from '../ai/extract.js';
 
 export const documentsRouter = Router();
@@ -49,6 +50,7 @@ documentsRouter.post('/companies', async (req, res) => {
     `INSERT INTO companies (user_id, name, matricule_fiscal, activity, sales_type) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
     [req.user.id, f.name, f.matricule_fiscal, f.activity, f.sales_type]
   );
+  await ensurePlan(rows[0].id);
   res.json({ company: rows[0] });
 });
 

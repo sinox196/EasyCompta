@@ -6,6 +6,7 @@ import { toMillimes, fromMillimes } from '../accounting/money.js';
 import { partnerKey } from '../accounting/entries.js';
 import { computeDeclaration } from '../accounting/declaration.js';
 import { afterChange } from '../worker.js';
+import { loadPlan } from '../accounting/plan.js';
 import { ACCOUNTS, JOURNALS, DOC_TYPES, EXPENSE_CATEGORIES, BANK_CATEGORIES, accountLabel } from '../accounting/plan-comptable.js';
 
 export const entriesRouter = Router();
@@ -43,12 +44,16 @@ entriesRouter.get('/companies/:companyId/entries', loadCompany, async (req, res)
   res.json({ entries: await entriesWithLines(where, params) });
 });
 
-function validateLines(rawLines) {
+function validateLines(rawLines, plan) {
   if (!Array.isArray(rawLines) || rawLines.length < 2) return { error: 'Une écriture a au moins 2 lignes' };
   const lines = [];
   for (const l of rawLines) {
     const account = String(l.account || '').trim();
     if (!/^\d{2,10}$/.test(account)) return { error: `Compte invalide : "${account}"` };
+    const acc = plan.get(account);
+    if (!acc) return { error: `Le compte ${account} n'existe pas dans le plan comptable : choisissez un compte proposé ou créez-le dans « Plan comptable ».` };
+    if (acc.nature === 'R') return { error: `Le compte ${account} (${acc.label}) est un compte de regroupement : choisissez un compte de détail (8 chiffres).` };
+    l.account_label = acc.label;
     const debit = toMillimes(l.debit);
     const credit = toMillimes(l.credit);
     if (debit < 0 || credit < 0) return { error: 'Montants négatifs interdits' };
@@ -85,7 +90,7 @@ async function writeLines(client, entryId, lines) {
 function mainLine(scope, lines) {
   if (scope === 'achat') return lines.find((l) => l.debit > 0 && /^[26]/.test(l.account)) || lines.find((l) => l.credit > 0 && /^[26]/.test(l.account));
   if (scope === 'vente') return lines.find((l) => l.credit > 0 && l.account.startsWith('7')) || lines.find((l) => l.debit > 0 && l.account.startsWith('7'));
-  if (scope === 'banque') return lines.find((l) => l.account !== '532');
+  if (scope === 'banque') return lines.find((l) => !l.account.startsWith('532'));
   return null;
 }
 
@@ -100,7 +105,7 @@ async function loadEntry(req, res, next) {
 }
 
 entriesRouter.put('/entries/:id', loadEntry, async (req, res) => {
-  const { lines, error } = validateLines(req.body?.lines);
+  const { lines, error } = validateLines(req.body?.lines, await loadPlan(req.entry.company_id));
   if (error) return res.status(400).json({ error });
   const date = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.entry_date || '') ? req.body.entry_date : null;
   const journal = JOURNALS[req.body?.journal] ? req.body.journal : req.entry.journal;
@@ -148,7 +153,7 @@ entriesRouter.put('/entries/:id', loadEntry, async (req, res) => {
 });
 
 entriesRouter.post('/companies/:companyId/entries', loadCompany, async (req, res) => {
-  const { lines, error } = validateLines(req.body?.lines);
+  const { lines, error } = validateLines(req.body?.lines, await loadPlan(req.company.id));
   if (error) return res.status(400).json({ error });
   const date = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.entry_date || '') ? req.body.entry_date : new Date().toISOString().slice(0, 10);
   const journal = JOURNALS[req.body?.journal] ? req.body.journal : 'OD';
@@ -226,8 +231,8 @@ entriesRouter.get('/companies/:companyId/tva', loadCompany, async (req, res) => 
   const year = Number(req.query.year) || new Date().getFullYear();
   const { rows } = await query(
     `SELECT to_char(e.entry_date, 'YYYY-MM') AS month,
-            COALESCE(sum(CASE WHEN l.account LIKE '4367%' THEN l.credit - l.debit END), 0) AS collectee,
-            COALESCE(sum(CASE WHEN l.account LIKE '4366%' THEN l.debit - l.credit END), 0) AS deductible,
+            COALESCE(sum(CASE WHEN l.account LIKE '43671%' THEN l.credit - l.debit END), 0) AS collectee,
+            COALESCE(sum(CASE WHEN (l.account LIKE '43662%' OR l.account LIKE '43663%' OR l.account LIKE '43666%') THEN l.debit - l.credit END), 0) AS deductible,
             COALESCE(sum(CASE WHEN l.account LIKE '7%' THEN l.credit - l.debit END), 0) AS chiffre_affaires
        FROM entries e JOIN entry_lines l ON l.entry_id = e.id
       WHERE e.company_id = $1 AND date_part('year', e.entry_date) = $2
@@ -245,8 +250,8 @@ entriesRouter.get('/companies/:companyId/declaration', loadCompany, async (req, 
   const m = (v) => toMillimes(v);
 
   const totals = `
-    COALESCE(sum(CASE WHEN l.account LIKE '4367%' THEN l.credit - l.debit END), 0) AS collectee,
-    COALESCE(sum(CASE WHEN l.account LIKE '4366%' THEN l.debit - l.credit END), 0) AS deductible`;
+    COALESCE(sum(CASE WHEN l.account LIKE '43671%' THEN l.credit - l.debit END), 0) AS collectee,
+    COALESCE(sum(CASE WHEN (l.account LIKE '43662%' OR l.account LIKE '43663%' OR l.account LIKE '43666%') THEN l.debit - l.credit END), 0) AS deductible`;
   const [{ rows: cur }, { rows: hist }, { rows: sales }, { rows: rsDocs }, { rows: drafts }] = await Promise.all([
     query(
       `SELECT ${totals},

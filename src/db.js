@@ -138,6 +138,18 @@ MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS file_hash TEXT`)
 MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS allow_duplicate BOOLEAN NOT NULL DEFAULT false`);
 MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS duplicate_of INTEGER`);
 MIGRATIONS.push(`CREATE INDEX IF NOT EXISTS documents_hash_idx ON documents(company_id, file_hash)`);
+// Plan comptable propre à chaque société (initialisé avec le plan tunisien).
+MIGRATIONS.push(`CREATE TABLE IF NOT EXISTS accounts (
+   company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+   code       TEXT NOT NULL,
+   label      TEXT NOT NULL DEFAULT '',
+   nature     TEXT NOT NULL DEFAULT 'C',
+   sens       TEXT NOT NULL DEFAULT '',
+   auxiliary  BOOLEAN NOT NULL DEFAULT false,
+   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+   PRIMARY KEY (company_id, code)
+ )`);
+MIGRATIONS.push(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS plan_version INTEGER NOT NULL DEFAULT 0`);
 // Lettrage : même code sur une facture et son règlement.
 MIGRATIONS.push(`ALTER TABLE entry_lines ADD COLUMN IF NOT EXISTS lettrage TEXT`);
 MIGRATIONS.push(`CREATE INDEX IF NOT EXISTS entry_lines_account_idx ON entry_lines(account)`);

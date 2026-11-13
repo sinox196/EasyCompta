@@ -4,7 +4,8 @@
 import { query, withTransaction } from '../db.js';
 import { toMillimes, fromMillimes } from './money.js';
 import { matchLines } from './lettrage.js';
-import { depreciationFor, accountLabel } from './plan-comptable.js';
+import { depreciationFor, dotationAccountFor } from './plan-comptable.js';
+import { loadPlan, accountFor } from './plan.js';
 import { dotationForYear } from './amortissement.js';
 
 export async function runLettrage(companyId) {
@@ -56,7 +57,7 @@ export async function syncImmobilisations(companyId) {
     await query(
       `INSERT INTO immobilisations (company_id, document_id, entry_line_id, label, account, acquisition_date, value, rate)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (entry_line_id) DO NOTHING`,
-      [companyId, r.document_id, r.id, r.label || accountLabel(r.account), r.account, r.date, r.debit, depreciationFor(r.account).rate]
+      [companyId, r.document_id, r.id, r.label || 'Immobilisation', r.account, r.date, r.debit, depreciationFor(r.account).rate]
     );
   }
   return rows.length;
@@ -68,17 +69,25 @@ export async function immobilisationsWithSchedule(companyId, year) {
        FROM immobilisations WHERE company_id = $1 ORDER BY acquisition_date, id`,
     [companyId]
   );
-  return rows.map((r) => {
+  const plan = await loadPlan(companyId);
+  const out = [];
+  for (const r of rows) {
     const s = dotationForYear({ value: toMillimes(r.value), rate: Number(r.rate), acquisition_date: r.acquisition_date }, year);
-    return {
+    const amort = await accountFor(companyId, plan, depreciationFor(r.account).account, '');
+    const dot = await accountFor(companyId, plan, dotationAccountFor(r.account), '');
+    out.push({
       ...r,
-      account_label: accountLabel(r.account),
-      amort_account: depreciationFor(r.account).account,
+      account_label: plan.get(r.account)?.label || '',
+      amort_account: amort.code,
+      amort_label: amort.label,
+      dotation_account: dot.code,
+      dotation_label: dot.label,
       dotation: fromMillimes(s.dotation),
       cumul_avant: fromMillimes(s.cumulBefore),
       vnc: fromMillimes(s.vnc),
-    };
-  });
+    });
+  }
+  return out;
 }
 
 // Écriture de dotations de l'année (OD au 31/12), recalculée à chaque appel.
@@ -88,8 +97,8 @@ export async function generateDotations(companyId, year) {
   for (const i of immos) {
     const amount = toMillimes(i.dotation);
     if (amount <= 0) continue;
-    lines.push({ account: '6811', label: `Dotation ${year} - ${i.label}`, debit: amount, credit: 0 });
-    lines.push({ account: i.amort_account, label: `Amortissement ${year} - ${i.label}`, debit: 0, credit: amount });
+    lines.push({ account: i.dotation_account, account_label: i.dotation_label, label: `Dotation ${year} - ${i.label}`, debit: amount, credit: 0 });
+    lines.push({ account: i.amort_account, account_label: i.amort_label, label: `Amortissement ${year} - ${i.label}`, debit: 0, credit: amount });
   }
   const piece = `AMORT-${year}`;
   return withTransaction(async (client) => {
@@ -104,7 +113,7 @@ export async function generateDotations(companyId, year) {
     for (const l of lines) {
       await client.query(
         `INSERT INTO entry_lines (entry_id, line_no, account, account_label, label, debit, credit) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [rows[0].id, n++, l.account, accountLabel(l.account), l.label, fromMillimes(l.debit), fromMillimes(l.credit)]
+        [rows[0].id, n++, l.account, l.account_label, l.label, fromMillimes(l.debit), fromMillimes(l.credit)]
       );
     }
     const total = lines.reduce((s, l) => s + l.debit, 0);
@@ -179,9 +188,9 @@ export async function runControls(companyId, year) {
     [companyId, year]
   );
   const soldeOf = (pred) => bal.filter((b) => pred(b.account)).reduce((s, b) => s + Number(b.solde), 0);
-  const attente = soldeOf((a) => a.startsWith('471'));
+  const attente = soldeOf((a) => a.startsWith('461'));
   if (Math.abs(attente) > 0.0005) {
-    add('warn', 'Compte d\'attente 471 non soldé', `${fromMillimes(toMillimes(Math.abs(attente)))} DT de mouvements bancaires n'ont pas pu être classés. Ouvrez le relevé et choisissez le bon compte.`, '#/ledger/471');
+    add('warn', 'Compte d\'attente 461 non soldé', `${fromMillimes(toMillimes(Math.abs(attente)))} DT de mouvements bancaires n'ont pas pu être classés. Ouvrez le relevé et choisissez le bon compte.`, '#/ledger/461');
   }
   const caisse = soldeOf((a) => a.startsWith('54'));
   if (caisse < -0.0005) {

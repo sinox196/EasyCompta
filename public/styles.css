@@ -393,6 +393,17 @@ tr.entry-head td { background: var(--surface-2); font-weight: 700; }
 .chip-filter button.active { background: var(--brand-gradient); color: #fff; border-color: transparent; }
 tr.subtotal td { background: var(--surface-2); font-weight: 700; }
 
+/* Suggestions */
+.ac-box { position: fixed; z-index: 400; max-width: 360px; max-height: 320px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-lg); padding: 4px; animation: pop 0.18s var(--ease) both; }
+.ac-item { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; padding: 7px 10px; border-radius: 8px; cursor: pointer; font-size: 0.88rem; }
+.ac-item.active, .ac-item:hover { background: var(--primary-soft); }
+.ac-code { font-family: var(--mono); font-weight: 600; color: var(--primary); white-space: nowrap; }
+.ac-label { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.ac-hint { grid-column: 2; font-size: 0.75rem; color: var(--muted); }
+.ac-item mark { background: rgba(2, 160, 145, 0.22); color: inherit; border-radius: 3px; padding: 0 1px; }
+tr.acc-group td { font-weight: 700; background: var(--surface-2); }
+tr.acc-group.lvl1 td { background: var(--primary-soft); color: var(--primary); }
+
 /* Contrôles, graphique, assistant */
 .checks { list-style: none; margin: 0; padding: 0; }
 .check { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-bottom: 1px solid var(--border); }
