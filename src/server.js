@@ -3,6 +3,8 @@ import cookieParser from 'cookie-parser';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { migrate, query } from './db.js';
+import { ensureAllPlans } from './accounting/plan.js';
+import { accountsRouter } from './routes/accounts.js';
 import { startWorker } from './worker.js';
 import { aiConfigured, aiDescription } from './ai/extract.js';
 import { authRouter } from './routes/auth.js';
@@ -32,6 +34,7 @@ app.use('/api', authRouter);
 app.use('/api', entriesRouter);
 app.use('/api', documentsRouter);
 app.use('/api', analyseRouter);
+app.use('/api', accountsRouter);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Route inconnue' }));
 
 app.use(
@@ -55,6 +58,7 @@ const port = Number(process.env.PORT || 3000);
 
 async function main() {
   await migrate();
+  await ensureAllPlans();
   app.listen(port, () => console.log(`EasyCompta en ligne sur le port ${port}`));
   if (process.env.WORKER_DISABLED !== '1') startWorker();
 }

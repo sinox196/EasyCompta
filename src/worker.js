@@ -3,6 +3,7 @@ import { extractDocument, isRetryable, aiConfigured } from './ai/extract.js';
 import { buildEntries } from './accounting/entries.js';
 import { fromMillimes } from './accounting/money.js';
 import { runLettrage, syncImmobilisations, findDuplicate } from './accounting/automation.js';
+import { ensurePlan, mapEntriesToPlan } from './accounting/plan.js';
 
 // File de traitement en arrière-plan, stockée dans PostgreSQL : chaque document
 // envoyé (web ou téléphone) est pris par le worker, lu par l'IA, puis transformé
@@ -60,6 +61,7 @@ export async function processDocument(doc) {
 
   const extracted = await extractDocument(company, pages, doc.type_hint);
   const rules = await loadRules(doc.company_id);
+  await ensurePlan(company.id);
   const built = buildEntries(extracted, company, rules);
   const { entries, warnings, summary } = built;
   let { needsReview } = built;
@@ -80,6 +82,10 @@ export async function processDocument(doc) {
     await afterChange(doc.company_id);
     return;
   }
+  // Comptes du plan de la société : racines -> comptes à 8 chiffres, fournisseurs et
+  // clients -> leur compte auxiliaire (créé à la première facture). Pas de création
+  // de tiers depuis un libellé de relevé bancaire.
+  await mapEntriesToPlan(company.id, entries, { createAuxiliaries: extracted.doc_type !== 'releve_bancaire' });
   const docStatus = needsReview ? 'review' : 'done';
   const entryStatus = needsReview ? 'draft' : 'validated';
 

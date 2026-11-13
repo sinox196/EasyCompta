@@ -21,8 +21,8 @@ test('facture d\'achat : charge + TVA déductible + timbre / fournisseur', () =>
   assert.ok(isBalanced(e.lines));
   const a = byAccount(e.lines);
   assert.equal(a['626'].debit, 1000000);
-  assert.equal(a['4366'].debit, 190000);
-  assert.equal(a['66'].debit, 1000);
+  assert.equal(a['43666'].debit, 190000);
+  assert.equal(a['6654'].debit, 1000);
   assert.equal(a['401'].credit, 1191000);
   assert.equal(r.needsReview, false);
 });
@@ -33,8 +33,8 @@ test('facture de vente : client / produit + TVA collectée + timbre', () => {
   assert.equal(r.entries[0].journal, 'VTE');
   assert.equal(a['411'].debit, 1191000);
   assert.equal(a['707'].credit, 1000000);
-  assert.equal(a['4367'].credit, 190000);
-  assert.equal(a['4368'].credit, 1000);
+  assert.equal(a['43671'].credit, 190000);
+  assert.equal(a['43678'].credit, 1000);
   assert.ok(isBalanced(r.entries[0].lines));
 });
 
@@ -49,6 +49,7 @@ test('immobilisation : fournisseur d\'immobilisations 404', () => {
   const r = buildEntries(doc('facture_achat', { ...baseInvoice, expense_category: 'immo_informatique' }), {});
   const a = byAccount(r.entries[0].lines);
   assert.ok(a['2283']);
+  assert.ok(a['43662']); // TVA sur immobilisations
   assert.equal(a['404'].credit, 1191000);
 });
 
@@ -56,7 +57,7 @@ test('ticket de caisse : journal caisse, crédit 541', () => {
   const r = buildEntries(doc('ticket_caisse', { ...baseInvoice, expense_category: 'carburant', vat_breakdown: [], total_ht: 0, total_vat: 0, stamp_duty: 0, total_ttc: 80 }), {});
   const e = r.entries[0];
   assert.equal(e.journal, 'CAI');
-  assert.equal(byAccount(e.lines)['541'].credit, 80000);
+  assert.equal(byAccount(e.lines)['5411'].credit, 80000);
   assert.ok(isBalanced(e.lines));
 });
 
@@ -67,9 +68,9 @@ test('écart de total : équilibré et signalé', () => {
 });
 
 test('règle apprise : le compte du fournisseur est réutilisé', () => {
-  const rules = new Map([[partnerKey('achat', 'Tunisie Telecom'), { account: '6064', account_label: 'X' }]]);
+  const rules = new Map([[partnerKey('achat', 'Tunisie Telecom'), { account: '60600000', account_label: 'X' }]]);
   const r = buildEntries(doc('facture_achat'), {}, rules);
-  assert.ok(byAccount(r.entries[0].lines)['6064']);
+  assert.ok(byAccount(r.entries[0].lines)['60600000']);
 });
 
 test('relevé bancaire : une écriture par mouvement et contrôle des soldes', () => {
@@ -83,9 +84,9 @@ test('relevé bancaire : une écriture par mouvement et contrôle des soldes', (
   const r = buildEntries(doc('releve_bancaire', baseInvoice, bank), {});
   assert.equal(r.entries.length, 2);
   r.entries.forEach((e) => assert.ok(isBalanced(e.lines)));
-  assert.equal(byAccount(r.entries[0].lines)['532'].debit, 600000);
+  assert.equal(byAccount(r.entries[0].lines)['5321'].debit, 600000);
   assert.equal(byAccount(r.entries[0].lines)['411'].credit, 600000);
-  assert.equal(byAccount(r.entries[1].lines)['627'].debit, 100000);
+  assert.equal(byAccount(r.entries[1].lines)['6278'].debit, 100000);
   assert.equal(r.needsReview, false);
 
   const bad = buildEntries(doc('releve_bancaire', baseInvoice, { ...bank, closing_balance: 9999 }), {});

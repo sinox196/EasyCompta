@@ -174,3 +174,94 @@ export function countUp(root) {
     requestAnimationFrame(step);
   });
 }
+
+// --- Suggestions (autocomplétion) --------------------------------------------------
+// Dès 2 caractères, propose les éléments dont le code commence par la saisie ou
+// dont l'intitulé contient tous les mots tapés (sans tenir compte des accents).
+const fold = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+export function suggest(items, q, limit = 12) {
+  const query = fold(q).trim();
+  if (!query) return [];
+  const words = query.split(/\s+/);
+  const scored = [];
+  for (const it of items) {
+    const v = fold(it.value);
+    const l = fold(it.label);
+    let score = -1;
+    if (v.startsWith(query)) score = 3 - Math.min(2, (v.length - query.length) / 8);
+    else if (words.every((w) => l.includes(w) || v.includes(w))) {
+      // Mots qui commencent par la saisie avant les correspondances en milieu de mot.
+      const wordStart = words.every((w) => l.split(/[^a-z0-9]+/).some((x) => x.startsWith(w)));
+      score = l.startsWith(query) ? 2 : wordStart ? 1.5 : 1;
+    }
+    if (score >= 0) scored.push([score, it]);
+  }
+  return scored.sort((a, b) => b[0] - a[0] || String(a[1].value).localeCompare(String(b[1].value))).slice(0, limit).map((s) => s[1]);
+}
+
+function highlight(text, q) {
+  const t = String(text ?? '');
+  const i = fold(t).indexOf(fold(q).trim());
+  if (!q || i < 0) return esc(t);
+  return `${esc(t.slice(0, i))}<mark>${esc(t.slice(i, i + q.trim().length))}</mark>${esc(t.slice(i + q.trim().length))}`;
+}
+
+/**
+ * @param {HTMLInputElement} input
+ * @param {{source: () => {value:string,label:string,hint?:string}[], onPick?: (item) => void, minChars?: number, fill?: 'value'|'label'}} opts
+ */
+export function autocomplete(input, { source, onPick, minChars = 2, fill = 'value' }) {
+  if (input.dataset.acBound) return;
+  input.dataset.acBound = '1';
+  input.setAttribute('autocomplete', 'off');
+  input.setAttribute('role', 'combobox');
+  input.setAttribute('aria-autocomplete', 'list');
+  let box = null;
+  let items = [];
+  let active = -1;
+  const close = () => { box?.remove(); box = null; active = -1; input.setAttribute('aria-expanded', 'false'); };
+  const place = () => {
+    if (!box) return;
+    const r = input.getBoundingClientRect();
+    box.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 368))}px`;
+    box.style.top = `${r.bottom + 4}px`;
+    box.style.minWidth = `${Math.max(r.width, 260)}px`;
+  };
+  const pick = (it) => {
+    input.value = it.fill ?? (fill === 'label' ? it.label : it.value);
+    close();
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    onPick?.(it);
+  };
+  const render = () => {
+    const q = input.value;
+    if (q.trim().length < minChars) return close();
+    items = suggest(source() || [], q);
+    if (!items.length) return close();
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'ac-box';
+      box.setAttribute('role', 'listbox');
+      document.body.appendChild(box);
+      input.setAttribute('aria-expanded', 'true');
+    }
+    active = Math.min(active, items.length - 1);
+    box.innerHTML = items.map((it, i) => `<div class="ac-item ${i === active ? 'active' : ''}" role="option" data-i="${i}">
+      <span class="ac-code">${highlight(it.value, q)}</span><span class="ac-label">${highlight(it.label, q)}</span>${it.hint ? `<span class="ac-hint">${esc(it.hint)}</span>` : ''}</div>`).join('');
+    box.querySelectorAll('.ac-item').forEach((el) => el.addEventListener('mousedown', (e) => { e.preventDefault(); pick(items[Number(el.dataset.i)]); }));
+    place();
+  };
+  input.addEventListener('input', (e) => { if (e.isTrusted) { active = -1; render(); } });
+  input.addEventListener('focus', () => { if (input.value.trim().length >= minChars) render(); });
+  input.addEventListener('blur', () => setTimeout(close, 120));
+  input.addEventListener('keydown', (e) => {
+    if (!box) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); active = (active + 1) % items.length; render(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); active = (active - 1 + items.length) % items.length; render(); }
+    else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); pick(items[active]); }
+    else if (e.key === 'Escape') close();
+  });
+  window.addEventListener('scroll', place, true);
+}

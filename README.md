@@ -23,6 +23,8 @@ On scanne une facture, un ticket ou un relevé bancaire avec le téléphone. L'I
 - **Contrôles automatiques** : factures scannées deux fois (aussi signalées dès la lecture), compte d'attente non soldé, caisse négative, fournisseurs débiteurs ou clients créditeurs, mois sans relevé bancaire, factures en retard, écritures déséquilibrées.
 - **Assistant IA** : questions en français ou en tounsi sur la comptabilité de la société (« chkoun ma 5allasnich ? »). Il répond à partir des chiffres du dossier.
 - **Tableau de bord** : graphique du chiffre d'affaires et des charges par mois, lignes à lettrer, résumé des contrôles.
+- **Plan comptable tunisien complet** (`src/accounting/plan-tunisien.json`, comptes à 8 chiffres), propre à chaque société et modifiable. Un compte auxiliaire est ouvert automatiquement pour chaque nouveau fournisseur (4011xxxx) ou client (4111xxxx). On peut importer un plan depuis Excel ou CSV (colonnes Code, Libellé, Nature, Sens). La logique comptable raisonne par racines (« 43666 », « 626 »), traduites en comptes réels par `src/accounting/plan-resolve.js`.
+- **Suggestions dès 2 caractères** sur les comptes et les tiers (saisie, filtres, recherche).
 - **Multi-sociétés** : un cabinet peut gérer plusieurs dossiers.
 - Une page **« Comment ça marche ? »** explique la comptabilité aux non-comptables.
 

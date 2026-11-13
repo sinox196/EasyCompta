@@ -158,7 +158,7 @@ function buildPurchase(data, rules, flag) {
   const isAsset = chargeAccount.startsWith('2');
   const isCash = data.doc_type === 'ticket_caisse' || inv.paid_in_cash === true;
   const isCredit = data.doc_type === 'avoir_achat';
-  const counterAccount = isCash ? '541' : isAsset ? '404' : '401';
+  const counterAccount = isCash ? '5411' : isAsset ? '404' : '401';
   const journal = isCash ? 'CAI' : 'ACH';
   const piece = inv.number || '';
   const label = `${isCredit ? 'Avoir' : isCash ? 'Ticket' : 'Fact.'} ${supplier}${piece ? ` n° ${piece}` : ''}`.trim();
@@ -166,8 +166,9 @@ function buildPurchase(data, rules, flag) {
   let lines = compact([
     // Le FODEC payé à l'achat n'est pas récupérable : il s'ajoute au coût.
     line(chargeAccount, inv.description || label, supplier, ht + fodec, 0, chargeLabel),
-    line('4366', `TVA déductible - ${supplier}`, supplier, vat, 0),
-    line('66', `Droit de timbre - ${supplier}`, supplier, stamp, 0),
+    // TVA sur immobilisations (43662) ou sur autres biens et services (43666).
+    line(isAsset ? '43662' : '43666', `TVA déductible - ${supplier}`, supplier, vat, 0),
+    line('6654', `Droit de timbre - ${supplier}`, supplier, stamp, 0),
     line(counterAccount, label, supplier, 0, ttc),
   ]);
   if (isCredit) lines = reverse(lines);
@@ -197,8 +198,9 @@ function buildSale(data, company, rules, flag) {
   let lines = compact([
     line('411', label, customer, ttc, 0),
     line(revenueAccount, inv.description || label, customer, 0, ht, learned?.account_label),
-    line('4367', `TVA collectée - ${customer}`, customer, 0, vat),
-    line('4368', `FODEC / droit de timbre - ${customer}`, customer, 0, fodec + stamp),
+    line('43671', `TVA collectée - ${customer}`, customer, 0, vat),
+    line('4468', `FODEC - ${customer}`, customer, 0, fodec),
+    line('43678', `Droit de timbre - ${customer}`, customer, 0, stamp),
   ]);
   if (isCredit) lines = reverse(lines);
 
@@ -235,13 +237,13 @@ function buildBank(data, rules, flag) {
     const partner = tx.counterparty || '';
     const learned = partner ? rules.get(partnerKey('banque', partner)) : null;
     const counterAccount = learned?.account || category.account;
-    if (!learned && counterAccount === '471') flag(`Ligne ${i + 1} « ${tx.label} » : nature inconnue, mise en compte d'attente 471.`);
+    if (!learned && counterAccount === '461') flag(`Ligne ${i + 1} « ${tx.label} » : nature inconnue, mise en compte d'attente 461.`);
 
     const label = String(tx.label || category.label).slice(0, 200);
     const lines =
       net > 0
-        ? [line('532', label, bankName, net, 0), line(counterAccount, label, partner, 0, net, learned?.account_label)]
-        : [line(counterAccount, label, partner, -net, 0, learned?.account_label), line('532', label, bankName, 0, -net)];
+        ? [line('5321', label, bankName, net, 0), line(counterAccount, label, partner, 0, net, learned?.account_label)]
+        : [line(counterAccount, label, partner, -net, 0, learned?.account_label), line('5321', label, bankName, 0, -net)];
     entries.push({ journal: 'BQ', date, piece_ref: `${bankName} L${i + 1}`, label, lines, partner, partner_scope: 'banque' });
   });
 

@@ -1,4 +1,4 @@
-import { api, esc, money, fmtDate, fmtDateTime, badge, toast, compressImage, uploadWithProgress, DOC_TYPE_LABELS, STATUS_LABELS as STATUS_TEXT, logo, countUp, downloadCSV } from './common.js';
+import { api, esc, money, fmtDate, fmtDateTime, badge, toast, compressImage, uploadWithProgress, DOC_TYPE_LABELS, STATUS_LABELS as STATUS_TEXT, logo, countUp, downloadCSV, autocomplete } from './common.js';
 
 const root = document.getElementById('root');
 const state = { user: null, companies: [], companyId: null, plan: null };
@@ -32,9 +32,43 @@ async function loadCompanies() {
   state.companyId = companies.find((c) => c.id === saved)?.id || companies[0]?.id || null;
 }
 
-async function loadPlan() {
+// Plan comptable : journaux et types (communs) + comptes de la société courante.
+async function loadPlan(force = false) {
   if (!state.plan) state.plan = await api('/plan-comptable');
+  if (state.companyId && (force || state.accountsFor !== state.companyId)) {
+    const { accounts } = await api(`/companies/${state.companyId}/accounts`);
+    state.accountList = accounts;
+    state.plan.accounts = Object.fromEntries(accounts.map((a) => [a.code, a.label]));
+    state.accountsFor = state.companyId;
+    state.tiers = null;
+  }
   return state.plan;
+}
+
+// Sources des suggestions (dès 2 caractères).
+function accountItems(detailOnly = true) {
+  return (state.accountList || [])
+    .filter((a) => !detailOnly || a.nature !== 'R')
+    .map((a) => ({ value: a.code, label: a.label, hint: a.auxiliary ? (a.code.startsWith('411') ? 'client' : 'fournisseur') : a.nature === 'R' ? 'regroupement' : '' }));
+}
+async function loadTiers() {
+  if (!state.tiers && state.companyId) state.tiers = (await api(`/companies/${state.companyId}/tiers`)).tiers;
+  return state.tiers || [];
+}
+function tiersItems() {
+  return (state.tiers || []).map((t) => ({ value: '', label: t, hint: 'tiers', fill: t }));
+}
+
+// Champs « compte » des éditeurs d'écritures : suggestions + intitulé mis à jour.
+function bindAccountAC(scope) {
+  scope.querySelectorAll('input[name=account]').forEach((inp) => autocomplete(inp, {
+    source: () => accountItems(true),
+    onPick: () => {
+      const lbl = inp.closest('tr')?.querySelector('.acc-label');
+      if (lbl) lbl.textContent = accountLabelOf(inp.value);
+      inp.closest('tr')?.querySelector('[name=label]')?.focus();
+    },
+  }));
 }
 
 window.addEventListener('hashchange', () => state.user && route());
@@ -99,6 +133,7 @@ const NAV = [
   ['journal', 'Écritures'],
   ['echeancier', 'Échéancier & lettrage'],
   ['balance', 'Balance & grand livre'],
+  ['plan', 'Plan comptable'],
   ['etats', 'Bilan & résultat'],
   ['immobilisations', 'Immobilisations'],
   ['controles', 'Contrôles'],
@@ -171,7 +206,7 @@ async function route() {
   if (!state.companyId && !['dossiers', 'aide'].includes(page)) return viewNoCompany();
   const loader = root.querySelector('#top-loader');
   loader?.classList.add('on');
-  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, assistant: viewAssistant, echeancier: viewEcheancier, etats: viewEtats, immobilisations: viewImmobilisations, controles: viewControles, telephone: viewPhone, dossiers: viewCompanies, aide: viewHelp };
+  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, assistant: viewAssistant, echeancier: viewEcheancier, etats: viewEtats, immobilisations: viewImmobilisations, controles: viewControles, plan: viewPlanComptable, telephone: viewPhone, dossiers: viewCompanies, aide: viewHelp };
   try {
     await (views[page] || viewDashboard)();
   } catch (err) {
@@ -455,7 +490,6 @@ async function viewDocument(id) {
           <h2 style="margin:0">Écritures générées (${entries.length})</h2><span class="spacer"></span>
           ${entries.some((e) => e.status === 'draft') ? '<button class="primary" id="validate-all">✓ Tout valider</button>' : ''}
         </div>
-        <datalist id="accounts">${Object.entries(plan.accounts).map(([n, l]) => `<option value="${n}">${esc(l)}</option>`).join('')}</datalist>
         <div id="entries">${entries.map(entryEditor).join('')}</div>
         <div class="card" style="margin-top:14px">
           <h3>Le document a été mal lu ?</h3>
@@ -509,7 +543,7 @@ function entryEditor(e) {
   const journals = state.plan.journals;
   const lineRow = (l = {}) => `
     <tr>
-      <td style="width:110px"><input class="mono" list="accounts" name="account" value="${esc(l.account)}" aria-label="Compte"></td>
+      <td style="width:110px"><input class="mono" name="account" value="${esc(l.account)}" aria-label="Compte"></td>
       <td><input name="label" value="${esc(l.label)}" aria-label="Libellé"><div class="small muted acc-label">${esc(l.account_label)}</div></td>
       <td style="width:120px"><input class="num" name="debit" inputmode="decimal" value="${Number(l.debit) ? Number(l.debit).toFixed(3) : ''}" aria-label="Débit"></td>
       <td style="width:120px"><input class="num" name="credit" inputmode="decimal" value="${Number(l.credit) ? Number(l.credit).toFixed(3) : ''}" aria-label="Crédit"></td>
@@ -554,6 +588,7 @@ function bindEntryEditor(card) {
   const bindRow = (tr) => {
     tr.querySelector('[data-remove]').addEventListener('click', () => { tr.remove(); recompute(); });
     tr.querySelectorAll('input').forEach((i) => i.addEventListener('input', recompute));
+    bindAccountAC(tr);
     tr.querySelector('[name=account]').addEventListener('change', (ev) => {
       tr.querySelector('.acc-label').textContent = accountLabelOf(ev.target.value);
     });
@@ -600,7 +635,8 @@ function bindEntryEditor(card) {
 
 function accountLabelOf(account) {
   const accounts = state.plan?.accounts || {};
-  for (let i = account.length; i > 0; i--) if (accounts[account.slice(0, i)]) return accounts[account.slice(0, i)];
+  const code = String(account || '');
+  for (let i = code.length; i > 0; i--) if (accounts[code.slice(0, i)]) return accounts[code.slice(0, i)];
   return '';
 }
 
@@ -654,6 +690,8 @@ async function viewJournal() {
     </table></div></div>`;
   bindPeriod(viewJournal);
   const search = main().querySelector('#j-search');
+  await loadTiers();
+  autocomplete(search, { source: () => [...accountItems(false), ...tiersItems()] });
   search.addEventListener('change', () => { journalSearch = search.value; viewJournal(); });
   main().querySelector('#new-entry').addEventListener('click', () => openEntryModal(null, viewJournal));
   main().querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
@@ -672,7 +710,7 @@ function openEntryModal(entry, onSaved) {
   const journals = state.plan.journals;
   const lineRow = (l = {}) => `
     <tr>
-      <td style="width:120px"><input class="mono" list="accounts" name="account" value="${esc(l.account)}" placeholder="ex. 626" aria-label="Compte"></td>
+      <td style="width:120px"><input class="mono" name="account" value="${esc(l.account)}" placeholder="ex. 626" aria-label="Compte"></td>
       <td><input name="label" value="${esc(l.label)}" placeholder="Libellé" aria-label="Libellé"><div class="small muted acc-label">${esc(l.account_label || accountLabelOf(l.account || ''))}</div></td>
       <td style="width:150px"><input name="third_party" value="${esc(l.third_party)}" placeholder="Tiers" aria-label="Tiers"></td>
       <td style="width:120px"><input class="num" name="debit" inputmode="decimal" value="${Number(l.debit) ? Number(l.debit).toFixed(3) : ''}" aria-label="Débit"></td>
@@ -684,7 +722,6 @@ function openEntryModal(entry, onSaved) {
   wrap.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true" aria-label="${isNew ? 'Nouvelle écriture' : 'Modifier l\'écriture'}">
       <header><h2>${isNew ? 'Nouvelle écriture' : 'Modifier l\'écriture'}</h2><span class="spacer"></span><button class="ghost" data-close aria-label="Fermer">✕</button></header>
-      <datalist id="accounts">${Object.entries(state.plan.accounts).map(([n, l]) => `<option value="${n}">${esc(l)}</option>`).join('')}</datalist>
       <div class="entry-card">
         <div class="head">
           <select name="journal" aria-label="Journal">${Object.entries(journals).map(([k, l]) => `<option value="${k}" ${k === e.journal ? 'selected' : ''}>${k} — ${esc(l)}</option>`).join('')}</select>
@@ -726,6 +763,7 @@ function openEntryModal(entry, onSaved) {
   const bindRow = (tr) => {
     tr.querySelector('[data-remove]').addEventListener('click', () => { tr.remove(); recompute(); });
     tr.querySelectorAll('input').forEach((i) => i.addEventListener('input', recompute));
+    bindAccountAC(tr);
     tr.querySelector('[name=account]').addEventListener('input', (ev) => { tr.querySelector('.acc-label').textContent = accountLabelOf(ev.target.value); });
   };
   tbody.querySelectorAll('tr').forEach(bindRow);
@@ -833,6 +871,8 @@ async function viewBalance() {
   let shown = render();
   main().querySelector('#f-acc').addEventListener('input', (ev) => { balanceFilter.account = ev.target.value; shown = render(); });
   main().querySelector('#f-lab').addEventListener('input', (ev) => { balanceFilter.label = ev.target.value; shown = render(); });
+  autocomplete(main().querySelector('#f-acc'), { source: () => accountItems(false) });
+  autocomplete(main().querySelector('#f-lab'), { source: () => accountItems(false), fill: 'label' });
   main().querySelectorAll('[data-cls]').forEach((b) => b.addEventListener('click', () => { balanceFilter.cls = b.dataset.cls; shown = render(); }));
   main().querySelector('#bal-export').addEventListener('click', () => {
     downloadCSV(`balance-${c.name}-${period.from}-${period.to}`, ['Compte', 'Intitulé', 'Débit', 'Crédit', 'Solde débiteur', 'Solde créditeur'],
@@ -872,10 +912,9 @@ async function viewLedger(account = '') {
   const title = account ? `${account} ${accountLabelOf(account)}` : 'tous les comptes';
   main().innerHTML = `
     <div class="page-head"><a class="btn" href="#/balance">← Balance</a><h1>Grand livre — ${esc(title)}</h1><span class="spacer"></span><button id="gl-export">⬇ Exporter (Excel)</button></div>
-    <datalist id="accounts">${Object.entries(state.plan.accounts).map(([n, l]) => `<option value="${n}">${esc(l)}</option>`).join('')}</datalist>
     <div class="card" style="margin-bottom:14px">
       <div class="filters">${periodForm(false)}
-        <div><label for="gl-acc">Compte (ou début de compte)</label><input id="gl-acc" class="mono" list="accounts" placeholder="ex. 401, 6…" value="${esc(account)}"></div>
+        <div><label for="gl-acc">Compte (ou début de compte)</label><input id="gl-acc" class="mono" placeholder="ex. 401, 6…" value="${esc(account)}"></div>
         <div><label for="gl-q">Rechercher</label><input type="search" id="gl-q" placeholder="Libellé, tiers, pièce…" value="${esc(ledgerFilter.q)}"></div>
         <div class="chip-filter">${[['', 'Tous'], ['d', 'Débits'], ['c', 'Crédits']].map(([k, l]) => `<button class="small" data-side="${k}">${l}</button>`).join('')}</div>
       </div>
@@ -887,6 +926,9 @@ async function viewLedger(account = '') {
   bindPeriod(() => viewLedger(account));
   let shown = render();
   const acc = main().querySelector('#gl-acc');
+  autocomplete(acc, { source: () => accountItems(false) });
+  await loadTiers();
+  autocomplete(main().querySelector('#gl-q'), { source: tiersItems });
   acc.addEventListener('change', () => { location.hash = acc.value.trim() ? `#/ledger/${encodeURIComponent(acc.value.trim())}` : '#/ledger'; });
   main().querySelector('#gl-q').addEventListener('input', (ev) => { ledgerFilter.q = ev.target.value; shown = render(); });
   main().querySelectorAll('[data-side]').forEach((b) => b.addEventListener('click', () => { ledgerFilter.side = b.dataset.side; shown = render(); }));
@@ -1106,17 +1148,17 @@ function viewHelp() {
     <h2>Les exemples d'écritures</h2>
     <p><b>Facture d'achat</b> (ex. internet 1 000 HT + 190 TVA + 1 timbre = 1 191 TTC) :</p>
     <div class="table-wrap"><table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead><tbody>
-      <tr><td class="mono">626</td><td>Charge : télécommunications</td><td class="num">1 000,000</td><td></td></tr>
-      <tr><td class="mono">4366</td><td>TVA déductible (récupérable)</td><td class="num">190,000</td><td></td></tr>
-      <tr><td class="mono">66</td><td>Droit de timbre</td><td class="num">1,000</td><td></td></tr>
-      <tr><td class="mono">401</td><td>Dette envers le fournisseur</td><td></td><td class="num">1 191,000</td></tr>
+      <tr><td class="mono">62600000</td><td>Charge : frais de télécommunications</td><td class="num">1 000,000</td><td></td></tr>
+      <tr><td class="mono">43666000</td><td>TVA déductible (récupérable)</td><td class="num">190,000</td><td></td></tr>
+      <tr><td class="mono">66540000</td><td>Droit de timbre</td><td class="num">1,000</td><td></td></tr>
+      <tr><td class="mono">40110001</td><td>Dette envers le fournisseur (son compte à lui)</td><td></td><td class="num">1 191,000</td></tr>
     </tbody></table></div>
-    <p style="margin-top:10px"><b>Paiement par banque</b> du fournisseur : débit 401 (la dette disparaît) / crédit 532 (l'argent sort de la banque).</p>
+    <p style="margin-top:10px"><b>Paiement par banque</b> du fournisseur : débit 40110001 (la dette disparaît) / crédit 53210000 (l'argent sort de la banque).</p>
     <h2>Petit lexique</h2>
     <dl>
       <dt>Débit / Crédit</dt><dd>Les deux colonnes d'une écriture. Chaque opération est enregistrée deux fois : d'où vient l'argent et où il va.</dd>
       <dt>Journal</dt><dd>Classement des écritures : ACH (achats), VTE (ventes), BQ (banque), CAI (caisse), OD (opérations diverses).</dd>
-      <dt>Plan comptable</dt><dd>La liste officielle des comptes (classe 2 immobilisations, 4 tiers, 5 trésorerie, 6 charges, 7 produits).</dd>
+      <dt>Plan comptable</dt><dd>La liste officielle des comptes (classe 2 immobilisations, 4 tiers, 5 trésorerie, 6 charges, 7 produits). Chaque fournisseur et chaque client a son propre compte (4011xxxx, 4111xxxx), créé automatiquement.</dd>
       <dt>Balance</dt><dd>Le total de chaque compte. Elle doit toujours être équilibrée.</dd>
       <dt>Grand livre</dt><dd>Le détail de tous les mouvements d'un compte.</dd>
       <dt>TVA collectée / déductible</dt><dd>La TVA facturée à vos clients (due à l'Etat) et celle payée à vos fournisseurs (récupérable).</dd>
@@ -1350,6 +1392,126 @@ async function viewAssistant() {
   main().querySelectorAll('[data-q]').forEach((b) => b.addEventListener('click', () => ask(b.dataset.q)));
   main().querySelector('#chat-clear')?.addEventListener('click', () => { chats[c.id] = []; viewAssistant(); });
   main().querySelector('#chat-input').focus();
+}
+
+// --- Plan comptable ---------------------------------------------------------------------
+
+const planFilter = { q: '', cls: '', only: '' };
+async function viewPlanComptable() {
+  await loadPlan(true);
+  const c = company();
+  const all = state.accountList;
+  const render = () => {
+    const q = planFilter.q.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const list = all.filter((a) => (!planFilter.cls || a.code.startsWith(planFilter.cls))
+      && (!planFilter.only || (planFilter.only === 'aux' ? a.auxiliary : planFilter.only === 'used' ? a.used > 0 : true))
+      && (!q || a.code.startsWith(q) || a.label.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').includes(q)));
+    const shown = list.slice(0, 400);
+    main().querySelector('#plan-body').innerHTML = shown.map((a) => {
+      const lvl = a.nature === 'R' ? (a.code.length <= 1 ? 'lvl1' : '') : '';
+      return `<tr class="${a.nature === 'R' ? `acc-group ${lvl}` : ''}" data-code="${esc(a.code)}">
+        <td class="mono">${esc(a.code)}</td>
+        <td><span class="lbl">${esc(a.label)}</span>
+          ${a.auxiliary ? ` <span class="badge pending" style="animation:none">${a.code.startsWith('411') ? 'client' : 'fournisseur'}</span>` : ''}</td>
+        <td class="small muted">${a.nature === 'R' ? 'Regroupement' : 'Détail'}</td>
+        <td class="small">${esc(a.sens)}</td>
+        <td class="num small">${a.used ? `<a href="#/ledger/${esc(a.code)}">${a.used}</a>` : ''}</td>
+        <td style="white-space:nowrap;text-align:right"><button class="ghost small" data-edit title="Renommer">✎</button>${a.used ? '' : '<button class="ghost small danger" data-del title="Supprimer">✕</button>'}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="6" class="muted">Aucun compte ne correspond.</td></tr>';
+    main().querySelector('#plan-count').textContent = `${list.length} compte(s)${list.length > shown.length ? ` — ${shown.length} affichés, affinez la recherche` : ''}`;
+    main().querySelectorAll('[data-cls]').forEach((b) => b.classList.toggle('active', b.dataset.cls === planFilter.cls));
+    main().querySelectorAll('[data-only]').forEach((b) => b.classList.toggle('active', b.dataset.only === planFilter.only));
+    main().querySelectorAll('#plan-body [data-edit]').forEach((b) => b.addEventListener('click', async () => {
+      const code = b.closest('tr').dataset.code;
+      const acc = all.find((a) => a.code === code);
+      const label = prompt(`Nouvel intitulé du compte ${code}`, acc.label);
+      if (!label || label === acc.label) return;
+      try { await api(`/companies/${c.id}/accounts/${code}`, { method: 'PUT', body: { label } }); toast('Compte renommé'); viewPlanComptable(); } catch (err) { toast(err.message, 'error'); }
+    }));
+    main().querySelectorAll('#plan-body [data-del]').forEach((b) => b.addEventListener('click', async () => {
+      const code = b.closest('tr').dataset.code;
+      if (!confirm(`Supprimer le compte ${code} ?`)) return;
+      try { await api(`/companies/${c.id}/accounts/${code}`, { method: 'DELETE' }); toast('Compte supprimé'); viewPlanComptable(); } catch (err) { toast(err.message, 'error'); }
+    }));
+    return list;
+  };
+  const classes = [['', 'Toutes'], ['1', '1 Capitaux'], ['2', '2 Immobilisations'], ['3', '3 Stocks'], ['4', '4 Tiers'], ['5', '5 Financiers'], ['6', '6 Charges'], ['7', '7 Produits']];
+  main().innerHTML = `
+    <div class="page-head"><h1>Plan comptable</h1><span class="muted">${all.length} comptes</span><span class="spacer"></span>
+      <label class="btn" style="margin:0">⬆ Importer (Excel)<input type="file" id="plan-file" accept=".xlsx,.csv" class="hidden"></label>
+      <button id="plan-export">⬇ Exporter (Excel)</button></div>
+    <p class="muted">Le plan comptable tunisien est installé par défaut. L'IA s'en sert pour chaque écriture et ouvre automatiquement un compte pour chaque nouveau fournisseur (4011xxxx) ou client (4111xxxx). Vous pouvez importer votre propre plan (colonnes <b>Code</b>, <b>Libellé</b>, et si possible <b>Nature</b> et <b>Sens</b>) : les comptes sont ajoutés ou mis à jour, aucun n'est supprimé.</p>
+    <div id="plan-import-result"></div>
+    <div class="grid-2" style="margin-bottom:16px">
+      <div class="card">
+        <div class="filters">
+          <div style="flex:1"><label for="plan-q">Rechercher un compte</label><input type="search" id="plan-q" placeholder="Numéro ou intitulé (ex. 6066, télécom, STEG)" value="${esc(planFilter.q)}"></div>
+        </div>
+        <div class="chip-filter" style="margin-top:12px">${classes.map(([k, l]) => `<button class="small" data-cls="${k}">${l}</button>`).join('')}</div>
+        <div class="chip-filter" style="margin-top:8px">${[['', 'Tous'], ['aux', 'Fournisseurs et clients'], ['used', 'Utilisés']].map(([k, l]) => `<button class="small" data-only="${k}">${l}</button>`).join('')}</div>
+      </div>
+      <div class="card">
+        <h3>Ajouter un compte</h3>
+        <form id="plan-add" class="filters">
+          <div style="min-width:130px"><label for="pa-code">Numéro</label><input id="pa-code" class="mono" inputmode="numeric" placeholder="ex. 60610000" required></div>
+          <div style="flex:1"><label for="pa-label">Intitulé</label><input id="pa-label" placeholder="ex. Achats de carburant" required></div>
+          <div><label for="pa-nature">Type</label><select id="pa-nature"><option value="C">Détail</option><option value="R">Regroupement</option></select></div>
+          <button class="primary">Ajouter</button>
+        </form>
+        <div class="row" style="margin-top:10px"><button class="small" data-new="401">＋ Nouveau fournisseur</button><button class="small" data-new="411">＋ Nouveau client</button></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="small muted" id="plan-count" style="margin-bottom:8px"></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Compte</th><th>Intitulé</th><th>Type</th><th>Sens</th><th class="num">Lignes</th><th></th></tr></thead>
+        <tbody id="plan-body"></tbody>
+      </table></div>
+    </div>`;
+  let shown = render();
+  const qInput = main().querySelector('#plan-q');
+  qInput.addEventListener('input', () => { planFilter.q = qInput.value; shown = render(); });
+  autocomplete(qInput, { source: () => accountItems(false) });
+  main().querySelectorAll('[data-cls]').forEach((b) => b.addEventListener('click', () => { planFilter.cls = b.dataset.cls; shown = render(); }));
+  main().querySelectorAll('[data-only]').forEach((b) => b.addEventListener('click', () => { planFilter.only = b.dataset.only; shown = render(); }));
+  main().querySelectorAll('[data-new]').forEach((b) => b.addEventListener('click', async () => {
+    const { code } = await api(`/companies/${c.id}/accounts/next/${b.dataset.new}`);
+    main().querySelector('#pa-code').value = code;
+    main().querySelector('#pa-label').value = '';
+    main().querySelector('#pa-label').placeholder = b.dataset.new === '411' ? 'Nom du client' : 'Nom du fournisseur';
+    main().querySelector('#pa-label').focus();
+  }));
+  main().querySelector('#plan-add').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api(`/companies/${c.id}/accounts`, { method: 'POST', body: { code: main().querySelector('#pa-code').value, label: main().querySelector('#pa-label').value, nature: main().querySelector('#pa-nature').value } });
+      toast('Compte ajouté');
+      viewPlanComptable();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  main().querySelector('#plan-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    const box = main().querySelector('#plan-import-result');
+    box.innerHTML = '<div class="alert info">Import en cours…</div>';
+    try {
+      const r = await api(`/companies/${c.id}/accounts/import`, { method: 'POST', form });
+      await loadPlan(true);
+      viewPlanComptable().then(() => {
+        main().querySelector('#plan-import-result').innerHTML = `<div class="alert info">✓ ${r.imported} compte(s) importé(s) dont ${r.auxiliaries} fournisseur(s)/client(s).
+          ${r.conflicts.length ? `<br>${r.conflicts.length} compte(s) déjà utilisé(s) dans vos écritures ont gardé leur intitulé actuel : ${r.conflicts.slice(0, 8).map((x) => `${esc(x.code)} « ${esc(x.current)} » (fichier : « ${esc(x.imported)} »)`).join(', ')}${r.conflicts.length > 8 ? '…' : ''}` : ''}</div>`;
+      });
+    } catch (err) {
+      box.innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
+    }
+  });
+  main().querySelector('#plan-export').addEventListener('click', () => {
+    downloadCSV(`plan-comptable-${c.name}`, ['Code', 'Libelle', 'Nature', 'Sens'],
+      shown.map((a) => [a.code, a.label, a.nature === 'R' ? 'Regroupement' : 'Comptable', a.sens]));
+  });
 }
 
 boot();

@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import QRCode from 'qrcode';
 import { query } from '../db.js';
 import { setSession, clearSession, requireAuth } from '../auth.js';
+import { ensurePlan } from '../accounting/plan.js';
 
 export const authRouter = Router();
 
@@ -25,7 +26,8 @@ authRouter.post('/auth/register', async (req, res) => {
     hash,
   ]);
   if (companyName) {
-    await query('INSERT INTO companies (user_id, name) VALUES ($1, $2)', [rows[0].id, companyName]);
+    const { rows: comp } = await query('INSERT INTO companies (user_id, name) VALUES ($1, $2) RETURNING id', [rows[0].id, companyName]);
+    await ensurePlan(comp[0].id);
   }
   setSession(res, rows[0]);
   res.json({ user: rows[0] });
