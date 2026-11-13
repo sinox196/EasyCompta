@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
+import crypto from 'node:crypto';
 import { query, withTransaction } from '../db.js';
 import { requireAuth, loadCompany } from '../auth.js';
 import { kickWorker, afterChange } from '../worker.js';
@@ -82,14 +83,33 @@ documentsRouter.post('/companies/:companyId/documents', loadCompany, (req, res, 
       // "separate" : chaque fichier est un document différent (glisser-déposer web).
       const groups = req.body.mode === 'single' ? [files] : files.map((f) => [f]);
 
+      // Un fichier identique (même empreinte) déjà importé dans cette société n'est
+      // pas importé une deuxième fois.
+      const hashOf = (group) => {
+        const h = crypto.createHash('sha256');
+        for (const f of group) h.update(f.buffer);
+        return h.digest('hex');
+      };
+      const duplicates = [];
       const ids = await withTransaction(async (client) => {
         const created = [];
+        const seen = new Set();
         for (const group of groups) {
           const name = group.length > 1 ? `${group[0].originalname} (+${group.length - 1} pages)` : group[0].originalname;
+          const hash = hashOf(group);
+          const { rows: existing } = await client.query(
+            `SELECT id FROM documents WHERE company_id = $1 AND file_hash = $2 ORDER BY id LIMIT 1`,
+            [req.company.id, hash]
+          );
+          if (existing[0] || seen.has(hash)) {
+            duplicates.push({ name, existing_id: existing[0]?.id || null });
+            continue;
+          }
+          seen.add(hash);
           const { rows } = await client.query(
-            `INSERT INTO documents (company_id, user_id, source, type_hint, original_name, page_count)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-            [req.company.id, req.user.id, source, typeHint, name.slice(0, 200), group.length]
+            `INSERT INTO documents (company_id, user_id, source, type_hint, original_name, page_count, file_hash)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+            [req.company.id, req.user.id, source, typeHint, name.slice(0, 200), group.length, hash]
           );
           let pageNo = 1;
           for (const f of group) {
@@ -105,7 +125,7 @@ documentsRouter.post('/companies/:companyId/documents', loadCompany, (req, res, 
         return created;
       });
       kickWorker();
-      res.json({ ids, ai_ready: aiConfigured() });
+      res.json({ ids, duplicates, ai_ready: aiConfigured() });
     } catch (e) {
       next(e);
     }
@@ -194,6 +214,17 @@ documentsRouter.post('/documents/:id/reprocess', loadDocument, async (req, res) 
     req.doc.id,
     hint,
   ]);
+  kickWorker();
+  res.json({ ok: true });
+});
+
+// « Ce n'est pas un doublon » : on relance la lecture en acceptant le document.
+documentsRouter.post('/documents/:id/not-duplicate', loadDocument, async (req, res) => {
+  await query(
+    `UPDATE documents SET status = 'pending', attempts = 0, error = NULL, retry_after = NULL, allow_duplicate = true, duplicate_of = NULL
+      WHERE id = $1`,
+    [req.doc.id]
+  );
   kickWorker();
   res.json({ ok: true });
 });

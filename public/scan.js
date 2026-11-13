@@ -161,12 +161,17 @@ async function send() {
   // Un PDF est déjà un document complet : on envoie chaque PDF séparément.
   form.append('mode', state.pages.some((p) => p.file.type === 'application/pdf') ? 'separate' : 'single');
   try {
-    await uploadWithProgress(`/companies/${state.companyId}/documents`, form, (p) => {
+    const res = await uploadWithProgress(`/companies/${state.companyId}/documents`, form, (p) => {
       const bar = root.querySelector('#bar');
       if (bar) bar.style.width = `${Math.round(p * 100)}%`;
     });
-    if (navigator.vibrate) navigator.vibrate(60);
-    showSuccess();
+    if (!res.ids?.length) {
+      toast('Ce document a déjà été importé : il n\'est pas envoyé une deuxième fois.', 'error');
+    } else {
+      if (navigator.vibrate) navigator.vibrate(60);
+      showSuccess();
+      if (res.duplicates?.length) toast(`${res.duplicates.length} fichier(s) déjà importé(s) ignoré(s)`, 'error');
+    }
     state.pages.forEach((p) => p.url && URL.revokeObjectURL(p.url));
     state.pages = [];
   } catch (err) {

@@ -205,16 +205,17 @@ entriesRouter.get('/companies/:companyId/balance', loadCompany, async (req, res)
 });
 
 entriesRouter.get('/companies/:companyId/ledger', loadCompany, async (req, res) => {
+  // Sans compte : grand livre de tous les comptes.
   const account = String(req.query.account || '');
-  if (!/^\d{1,10}$/.test(account)) return res.status(400).json({ error: 'Compte invalide' });
+  if (account && !/^\d{1,10}$/.test(account)) return res.status(400).json({ error: 'Compte invalide' });
   const params = [req.company.id, `${account}%`];
   const where = periodFilter(req, params);
   const { rows } = await query(
     `SELECT e.id AS entry_id, to_char(e.entry_date, 'YYYY-MM-DD') AS entry_date, e.journal, e.piece_ref, e.document_id,
-            l.account, l.label, l.third_party, l.debit, l.credit
+            l.account, l.account_label, l.label, l.third_party, l.debit, l.credit
        FROM entries e JOIN entry_lines l ON l.entry_id = e.id
       WHERE e.company_id = $1 AND l.account LIKE $2 ${where}
-      ORDER BY e.entry_date, e.id, l.line_no`,
+      ORDER BY l.account, e.entry_date, e.id, l.line_no`,
     params
   );
   res.json({ lines: rows });
