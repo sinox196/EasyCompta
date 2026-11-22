@@ -41,7 +41,8 @@ entriesRouter.get('/companies/:companyId/entries', loadCompany, async (req, res)
     params.push(req.query.journal);
     where += ` AND e.journal = $${params.length}`;
   }
-  res.json({ entries: await entriesWithLines(where, params) });
+  const { rows: all } = await query('SELECT count(*)::int AS n FROM entries WHERE company_id = $1', [req.company.id]);
+  res.json({ entries: await entriesWithLines(where, params), total_all: all[0].n });
 });
 
 function validateLines(rawLines, plan) {
