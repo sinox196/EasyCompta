@@ -179,7 +179,7 @@ function renderPages() {
     render();
   }));
   root.querySelector('#hint').textContent = state.pages.length
-    ? 'Ces photos forment un seul document (ses pages). Document suivant ? Appuyez sur « Document terminé ».'
+    ? 'Plusieurs factures dans ces photos ? Pas de souci : l\'IA les sépare automatiquement. Vous pouvez aussi appuyer sur « Document terminé » entre deux documents.'
     : '';
   const queue = root.querySelector('#queue');
   queue.innerHTML = state.docs.length ? `<div class="card queue-card"><h2>Prêts à envoyer (${state.docs.length})</h2>

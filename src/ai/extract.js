@@ -36,9 +36,9 @@ const obj = (properties) => ({
   additionalProperties: false,
 });
 
-// Schéma imposé à la réponse de l'IA (structured outputs). Pas de null :
-// les champs absents valent "" ou 0.
-export const EXTRACTION_SCHEMA = obj({
+// Schéma d'UN document. Pas de null : les champs absents valent "" ou 0.
+export const DOC_SCHEMA = obj({
+  pages: { type: 'array', items: { type: 'integer' } },
   doc_type: {
     type: 'string',
     enum: ['facture_achat', 'facture_vente', 'avoir_achat', 'avoir_vente', 'ticket_caisse', 'releve_bancaire', 'autre'],
@@ -88,13 +88,28 @@ export const EXTRACTION_SCHEMA = obj({
   }),
 });
 
+// Réponse complète : un envoi peut contenir plusieurs documents (plusieurs factures
+// photographiées à la suite, un PDF qui en regroupe plusieurs, deux tickets sur une photo).
+export const EXTRACTION_SCHEMA = obj({
+  documents: { type: 'array', items: DOC_SCHEMA },
+});
+
+// Accepte la réponse en plusieurs documents ou l'ancien format (un seul document).
+export function splitExtraction(raw) {
+  if (Array.isArray(raw?.documents) && raw.documents.length) return raw.documents;
+  if (raw?.doc_type) return [raw];
+  return [];
+}
+
 function categoryList(categories) {
   return Object.entries(categories)
     .map(([key, c]) => `- ${key} : ${c.label}`)
     .join('\n');
 }
 
-const SYSTEM_PROMPT = `Tu es l'assistant de saisie comptable d'un cabinet tunisien. On te donne les pages scannées (souvent photographiées au téléphone) d'UN document : facture, avoir, ticket de caisse ou relevé bancaire, d'une entreprise tunisienne. Tu en extrais les données exactes ; un programme génère ensuite les écritures comptables à partir de ta réponse.
+const SYSTEM_PROMPT = `Tu es l'assistant de saisie comptable d'un cabinet tunisien. On te donne des pages scannées (souvent photographiées au téléphone) : factures, avoirs, tickets de caisse ou relevés bancaires d'une entreprise tunisienne. Tu en extrais les données exactes ; un programme génère ensuite les écritures comptables à partir de ta réponse.
+
+Un envoi contient UN OU PLUSIEURS documents distincts : plusieurs factures photographiées à la suite, un PDF qui regroupe plusieurs factures, deux tickets sur une même photo. Retourne dans "documents" un élément par document distinct, dans l'ordre, sans en oublier aucun. Les pages d'un même document (page 1/2 et 2/2, même numéro de facture, suite d'un relevé) forment UN seul élément. Pour chaque élément, "pages" liste les numéros des pages (à partir de 1) où il apparaît.
 
 Contexte tunisien :
 - Monnaie : dinar tunisien (TND, DT), 3 décimales (millimes). "1.250,000" ou "1 250.000" = 1250 dinars. Ne confonds jamais les séparateurs.
@@ -140,14 +155,15 @@ const HINTS = {
  * @param {{mime: string, data: Buffer}[]} pages
  * @param {string} typeHint
  */
+/** @returns {Promise<object[]>} un élément par document distinct trouvé dans l'envoi */
 export async function extractDocument(company, pages, typeHint = 'auto') {
-  if (process.env.AI_MOCK === '1') return mockExtraction(typeHint);
+  if (process.env.AI_MOCK === '1') return mockExtraction(typeHint, pages.length);
 
-  const userText = [`Document de ${pages.length} page(s). Extrais les données selon le schéma.`, HINTS[typeHint] || '']
+  const userText = [`Envoi de ${pages.length} page(s), numérotées de 1 à ${pages.length} dans l'ordre. Repère chaque document distinct et extrais ses données selon le schéma.`, HINTS[typeHint] || '']
     .filter(Boolean)
     .join('\n');
   if (PROVIDER === 'gemini') {
-    return extractWithGemini(buildSystemPrompt(company), pages, userText, EXTRACTION_SCHEMA);
+    return splitExtraction(await extractWithGemini(buildSystemPrompt(company), pages, userText, EXTRACTION_SCHEMA));
   }
 
   const content = pages.map((p) =>
@@ -182,11 +198,13 @@ export async function extractDocument(company, pages, typeHint = 'auto') {
     .filter((b) => b.type === 'text')
     .map((b) => b.text)
     .join('');
+  let parsed;
   try {
-    return JSON.parse(text);
+    parsed = JSON.parse(text);
   } catch {
     throw new Error('Réponse de l\'IA illisible (JSON invalide).');
   }
+  return splitExtraction(parsed);
 }
 
 // Erreur qu'il ne sert à rien de réessayer.
@@ -206,7 +224,19 @@ export function isRetryable(err) {
 }
 
 // Mode démo (AI_MOCK=1) : réponse factice pour tester sans clé API.
-function mockExtraction(typeHint) {
+function mockExtraction(typeHint, pageCount = 1) {
+  const one = mockOne(typeHint);
+  if (typeHint === 'releve_bancaire' || pageCount < 2) return [{ ...one, pages: [1] }];
+  // Démo : plusieurs pages = plusieurs factures différentes.
+  return Array.from({ length: pageCount }, (_, i) => ({
+    ...one,
+    pages: [i + 1],
+    invoice: { ...one.invoice, number: `${one.invoice.number}-${i + 1}`, total_ht: 1000 + i * 100, total_ttc: 1191 + i * 119,
+      total_vat: 190 + i * 19, vat_breakdown: [{ rate: 19, base_ht: 1000 + i * 100, vat: 190 + i * 19 }] },
+  }));
+}
+
+function mockOne(typeHint) {
   const emptyInvoice = {
     number: '', date: '', due_date: '', supplier_name: '', supplier_tax_id: '', customer_name: '',
     customer_tax_id: '', currency: '', vat_breakdown: [], fodec: 0, stamp_duty: 0, total_ht: 0,

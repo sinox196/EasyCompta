@@ -59,11 +59,56 @@ export async function processDocument(doc) {
   const { rows: pages } = await query('SELECT mime, data FROM document_pages WHERE document_id = $1 ORDER BY page_no', [doc.id]);
   if (!company || pages.length === 0) throw new Error('Document ou société introuvable');
 
-  const extracted = await extractDocument(company, pages, doc.type_hint);
-  const rules = await loadRules(doc.company_id);
+  let parts = await extractDocument(company, pages, doc.type_hint);
+  if (!parts.length) parts = [{ doc_type: 'autre', readable: false, confidence: 0, notes: 'Aucun document reconnu', pages: [] }];
   await ensurePlan(company.id);
+  const rules = await loadRules(doc.company_id);
+
+  // Un nouvel essai remplace les documents séparés lors d'une lecture précédente.
+  await query('DELETE FROM documents WHERE parent_id = $1', [doc.id]);
+
+  // Plusieurs documents dans un même envoi : le premier reste sur ce document, les
+  // suivants deviennent des documents à part, chacun avec ses pages et ses écritures.
+  const children = [];
+  for (let i = 1; i < parts.length; i++) {
+    children.push(await createSplitDocument(doc, parts[i], i, parts.length, pages.length));
+  }
+  const splitNote = parts.length > 1
+    ? `Cet envoi contenait ${parts.length} documents : ils ont été séparés automatiquement (documents n° ${[doc.id, ...children.map((c) => c.id)].join(', ')}).`
+    : null;
+  await saveExtraction(doc, company, parts[0], rules, splitNote);
+  for (let i = 0; i < children.length; i++) {
+    await saveExtraction(children[i], company, parts[i + 1], rules, splitNote);
+  }
+  await afterChange(doc.company_id);
+}
+
+// Nouveau document issu d'un envoi qui en contenait plusieurs : il reprend les pages
+// indiquées par l'IA (toutes si elle ne les précise pas).
+async function createSplitDocument(parent, part, index, total, pageCount) {
+  const wanted = (Array.isArray(part.pages) ? part.pages : []).map(Number).filter((n) => n >= 1 && n <= pageCount);
+  const pageNos = wanted.length ? [...new Set(wanted)].sort((a, b) => a - b) : Array.from({ length: pageCount }, (_, i) => i + 1);
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO documents (company_id, user_id, source, type_hint, original_name, page_count, status, parent_id, allow_duplicate, started_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'processing', $7, $8, now()) RETURNING *`,
+      [parent.company_id, parent.user_id, parent.source, parent.type_hint,
+        `${parent.original_name} — document ${index + 1}/${total}`.slice(0, 200), pageNos.length, parent.id, parent.allow_duplicate]
+    );
+    await client.query(
+      `INSERT INTO document_pages (document_id, page_no, mime, data)
+       SELECT $1, row_number() OVER (ORDER BY page_no), mime, data FROM document_pages
+        WHERE document_id = $2 AND page_no = ANY($3::int[])`,
+      [rows[0].id, parent.id, pageNos]
+    );
+    return rows[0];
+  });
+}
+
+async function saveExtraction(doc, company, extracted, rules, splitNote) {
   const built = buildEntries(extracted, company, rules);
-  const { entries, warnings, summary } = built;
+  const { entries, summary } = built;
+  const warnings = splitNote ? [splitNote, ...built.warnings] : built.warnings;
   let { needsReview } = built;
   // Document déjà importé (même facture ou même relevé) : aucune écriture n'est
   // passée, sauf si l'utilisateur a confirmé que ce n'est pas un doublon.
@@ -79,7 +124,6 @@ export async function processDocument(doc) {
           JSON.stringify([`Ce document a déjà été importé (document n° ${duplicateOf}) : il n'a pas été comptabilisé une deuxième fois.`])]
       );
     });
-    await afterChange(doc.company_id);
     return;
   }
   // Comptes du plan de la société : racines -> comptes à 8 chiffres, fournisseurs et
@@ -98,7 +142,6 @@ export async function processDocument(doc) {
       [doc.id, docStatus, extracted.doc_type, JSON.stringify(extracted), JSON.stringify(warnings), summary]
     );
   });
-  await afterChange(doc.company_id);
 }
 
 // Après chaque changement d'écritures : lettrage et immobilisations automatiques.
