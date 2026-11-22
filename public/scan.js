@@ -1,4 +1,4 @@
-import { api, esc, badge, toast, compressImage, uploadWithProgress, fmtDateTime, logo } from './common.js';
+import { api, esc, badge, toast, compressImage, uploadWithProgress, fmtDateTime, logo, autocomplete } from './common.js';
 
 const root = document.getElementById('root');
 // pages : document en cours de scan ; docs : documents terminés, prêts à envoyer.
@@ -76,7 +76,10 @@ function render() {
   root.innerHTML = `
     <div class="scan-top">
       ${logo('', true)}
-      <select id="company" aria-label="Société">${state.companies.map((c) => `<option value="${c.id}" ${c.id === state.companyId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <div class="scan-company">
+        <b>${esc(state.companies.find((c) => c.id === state.companyId)?.name || '')}</b>
+        ${state.companies.length > 1 ? '<input type="search" id="company" placeholder="🔍 Changer de client…" aria-label="Rechercher un dossier client">' : ''}
+      </div>
     </div>
     <div class="chips" role="radiogroup" aria-label="Type de document">
       ${TYPES.map(([k, l]) => `<button role="radio" aria-checked="${state.type === k}" class="${state.type === k ? 'active' : ''}" data-type="${k}">${l}</button>`).join('')}
@@ -114,11 +117,19 @@ function render() {
       <div class="inner"><div class="progress" style="flex:1"><div id="bar"></div></div></div>
     </div>`;
 
-  root.querySelector('#company').addEventListener('change', (e) => {
-    state.companyId = Number(e.target.value);
-    store('ec_scan_company', String(state.companyId));
-    loadRecent();
-  });
+  const picker = root.querySelector('#company');
+  if (picker) {
+    autocomplete(picker, {
+      source: () => state.companies.map((c) => ({ value: '', id: c.id, label: c.name, fill: c.name, hint: c.matricule_fiscal || '', search: c.activity || '' })),
+      emptyList: 8,
+      clearOnPick: true,
+      onPick: (it) => {
+        state.companyId = it.id;
+        store('ec_scan_company', String(it.id));
+        render();
+      },
+    });
+  }
   root.querySelectorAll('[data-type]').forEach((b) => b.addEventListener('click', () => { state.type = b.dataset.type; render(); }));
   root.querySelector('#camera').addEventListener('change', (e) => addFiles(e.target.files));
   root.querySelector('#gallery').addEventListener('change', (e) => addFiles(e.target.files, true));
