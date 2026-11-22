@@ -140,7 +140,6 @@ const navItems = () => (isClient() ? CLIENT_NAV : NAV);
 const NAV = [
   ['clients', '👥 Mes clients'],
   ['dashboard', 'Tableau de bord'],
-  ['assistant', '✨ Assistant IA'],
   ['documents', 'Documents'],
   ['journal', 'Écritures'],
   ['echeancier', 'Échéancier & lettrage'],
@@ -176,7 +175,14 @@ function renderShell() {
       <button class="ghost small" id="logout">Se déconnecter</button>
     </aside>
     <main class="main" id="main"></main>
-  </div>`;
+  </div>
+  <button class="ai-fab hidden" id="ai-fab" aria-label="Assistant IA" title="Assistant IA"><span class="ai-fab-icon">✨</span></button>
+  <section class="ai-panel hidden" id="ai-panel" role="dialog" aria-label="Assistant IA"></section>`;
+  root.querySelector('#ai-fab').addEventListener('click', () => {
+    root.querySelector('#ai-fab').classList.remove('unread');
+    if (isAssistantOpen()) closeAssistant(); else openAssistant();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && isAssistantOpen() && !document.querySelector('.modal-backdrop')) closeAssistant(); });
   setTimeout(() => root.querySelector('#sidebar')?.classList.remove('intro'), 1200);
   root.querySelector('#menu-btn').addEventListener('click', () => root.querySelector('#sidebar').classList.toggle('open'));
   root.querySelector('#logout').addEventListener('click', async () => {
@@ -215,6 +221,7 @@ function switchCompany(id) {
 function renderSidebar() {
   const cur = root.querySelector('#company-current');
   if (!cur) return;
+  updateAiFab();
   const c = company();
   cur.innerHTML = c
     ? `<div class="client-avatar sm" aria-hidden="true">${esc(c.name.trim().slice(0, 2).toUpperCase())}</div><div class="cc-text"><b>${esc(c.name)}</b>${c.matricule_fiscal ? `<span>${esc(c.matricule_fiscal)}</span>` : ''}</div>`
@@ -247,7 +254,7 @@ async function route() {
   if (isClient() && !CLIENT_NAV.some(([id]) => id === page) && page !== 'documents') { location.hash = '#/dashboard'; return; }
   const loader = root.querySelector('#top-loader');
   loader?.classList.add('on');
-  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, assistant: viewAssistant, echeancier: viewEcheancier, etats: viewEtats, immobilisations: viewImmobilisations, controles: viewControles, plan: viewPlanComptable, telephone: viewPhone, clients: viewClients, dossiers: viewClients, aide: viewHelp };
+  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, assistant: () => { openAssistant(); return viewDashboard(); }, echeancier: viewEcheancier, etats: viewEtats, immobilisations: viewImmobilisations, controles: viewControles, plan: viewPlanComptable, telephone: viewPhone, clients: viewClients, dossiers: viewClients, aide: viewHelp };
   try {
     await (views[page] || viewDashboard)();
   } catch (err) {
@@ -1464,47 +1471,93 @@ function formatAnswer(text) {
     .replace(/\n/g, '<br>');
 }
 
-async function viewAssistant() {
+// Bulle flottante (bouton ✨ en bas à droite) : disponible sur toutes les pages du
+// cabinet, la conversation est gardée par dossier.
+const AI_SUGGESTIONS = ['Chhal 3andi fel banque taw ?', 'Chkoun mel clients ma 5allasnich ?', 'Chnowa akbar masrouf 3andi hal 3am ?', 'Est-ce que la société est bénéficiaire cette année ?', 'Chnowa lezem n3adi fel déclaration mta3 hal chhar ?'];
+let aiBusy = false;
+
+function aiAvailable() {
+  return Boolean(state.user && state.companyId && !isClient());
+}
+
+function updateAiFab() {
+  const fab = document.getElementById('ai-fab');
+  if (!fab) return;
+  fab.classList.toggle('hidden', !aiAvailable());
+  if (!aiAvailable()) closeAssistant();
+  else if (isAssistantOpen()) renderAssistant();
+}
+
+const isAssistantOpen = () => !document.getElementById('ai-panel')?.classList.contains('hidden');
+
+function openAssistant() {
+  if (!aiAvailable()) return;
+  const panel = document.getElementById('ai-panel');
+  panel.classList.remove('hidden');
+  document.getElementById('ai-fab').classList.add('open');
+  renderAssistant();
+  panel.querySelector('#chat-input')?.focus();
+}
+
+function closeAssistant() {
+  document.getElementById('ai-panel')?.classList.add('hidden');
+  document.getElementById('ai-fab')?.classList.remove('open');
+}
+
+function renderAssistant() {
+  const panel = document.getElementById('ai-panel');
   const c = company();
+  if (!panel || !c) return;
   const history = (chats[c.id] ||= []);
-  const suggestions = ['Chhal 3andi fel banque taw ?', 'Chkoun mel clients ma 5allasnich ?', 'Chnowa akbar masrouf 3andi hal 3am ?', 'Est-ce que la société est bénéficiaire cette année ?', 'Chnowa lezem n3adi fel déclaration mta3 hal chhar ?'];
-  main().innerHTML = `
-    <div class="page-head"><h1>✨ Assistant IA</h1><span class="spacer"></span>${history.length ? '<button class="ghost" id="chat-clear">Nouvelle conversation</button>' : ''}</div>
-    <div class="card chat">
-      <div class="chat-log" id="chat-log">
-        ${history.length ? '' : `<div class="muted">Posez une question sur la comptabilité de <b>${esc(c.name)}</b>, en français ou en tounsi. L'assistant répond à partir de vos documents et écritures.</div>
-          <div class="chips" style="margin-top:12px">${suggestions.map((q, i) => `<button class="small" style="animation-delay:${i * 60}ms" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>`}
-        ${history.map((m) => `<div class="msg ${m.role}">${m.role === 'user' ? esc(m.content) : formatAnswer(m.content)}</div>`).join('')}
-      </div>
-      <form id="chat-form" class="row" style="margin-top:12px;flex-wrap:nowrap">
-        <input id="chat-input" placeholder="Votre question…" autocomplete="off" required>
-        <button class="primary">Envoyer</button>
-      </form>
-    </div>`;
-  const log = main().querySelector('#chat-log');
+  panel.innerHTML = `
+    <header>
+      <div class="ai-avatar" aria-hidden="true">✨</div>
+      <div style="flex:1;min-width:0"><b>Assistant IA</b><div class="small muted ai-company">${esc(c.name)}</div></div>
+      ${history.length ? '<button class="ghost small" id="chat-clear" title="Nouvelle conversation">↺</button>' : ''}
+      <button class="ghost small" id="ai-close" aria-label="Fermer">✕</button>
+    </header>
+    <div class="chat-log" id="chat-log">
+      ${history.length ? '' : `<div class="msg assistant">Bonjour 👋 Posez-moi une question sur la comptabilité de <b>${esc(c.name)}</b>, en français ou en tounsi.</div>
+        <div class="chips">${AI_SUGGESTIONS.map((q, i) => `<button class="small" style="animation-delay:${i * 60}ms" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>`}
+      ${history.map((m) => `<div class="msg ${m.role}">${m.role === 'user' ? esc(m.content) : formatAnswer(m.content)}</div>`).join('')}
+      ${aiBusy ? '<div class="msg assistant"><span class="typing"><i></i><i></i><i></i></span></div>' : ''}
+    </div>
+    <form id="chat-form">
+      <input id="chat-input" placeholder="Votre question…" autocomplete="off" required ${aiBusy ? 'disabled' : ''}>
+      <button class="primary" aria-label="Envoyer" ${aiBusy ? 'disabled' : ''}>➤</button>
+    </form>`;
+  const log = panel.querySelector('#chat-log');
   log.scrollTop = log.scrollHeight;
-  const ask = async (q) => {
-    history.push({ role: 'user', content: q });
-    viewAssistant();
-    const l = main().querySelector('#chat-log');
-    l.insertAdjacentHTML('beforeend', '<div class="msg assistant" id="thinking"><span class="typing"><i></i><i></i><i></i></span></div>');
-    l.scrollTop = l.scrollHeight;
-    try {
-      const { answer } = await api(`/companies/${c.id}/assistant`, { method: 'POST', body: { messages: history } });
-      history.push({ role: 'assistant', content: answer });
-    } catch (err) {
-      history.push({ role: 'assistant', content: `⚠ ${err.message}` });
-    }
-    if (location.hash.startsWith('#/assistant')) viewAssistant();
-  };
-  main().querySelector('#chat-form').addEventListener('submit', (e) => {
+  panel.querySelector('#ai-close').addEventListener('click', closeAssistant);
+  panel.querySelector('#chat-clear')?.addEventListener('click', () => { chats[c.id] = []; renderAssistant(); });
+  panel.querySelector('#chat-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    const q = main().querySelector('#chat-input').value.trim();
-    if (q) ask(q);
+    const q = panel.querySelector('#chat-input').value.trim();
+    if (q) askAssistant(q);
   });
-  main().querySelectorAll('[data-q]').forEach((b) => b.addEventListener('click', () => ask(b.dataset.q)));
-  main().querySelector('#chat-clear')?.addEventListener('click', () => { chats[c.id] = []; viewAssistant(); });
-  main().querySelector('#chat-input').focus();
+  panel.querySelectorAll('[data-q]').forEach((b) => b.addEventListener('click', () => askAssistant(b.dataset.q)));
+}
+
+async function askAssistant(q) {
+  const c = company();
+  if (!c || aiBusy) return;
+  const history = (chats[c.id] ||= []);
+  history.push({ role: 'user', content: q });
+  aiBusy = true;
+  renderAssistant();
+  try {
+    const { answer } = await api(`/companies/${c.id}/assistant`, { method: 'POST', body: { messages: history } });
+    history.push({ role: 'assistant', content: answer });
+  } catch (err) {
+    history.push({ role: 'assistant', content: `⚠ ${err.message}` });
+  }
+  aiBusy = false;
+  if (isAssistantOpen()) {
+    renderAssistant();
+    document.querySelector('#ai-panel #chat-input')?.focus();
+  } else {
+    document.getElementById('ai-fab')?.classList.add('unread');
+  }
 }
 
 // --- Plan comptable ---------------------------------------------------------------------
