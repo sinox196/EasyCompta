@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { migrate, query } from './db.js';
 import { ensureAllPlans } from './accounting/plan.js';
 import { accountsRouter } from './routes/accounts.js';
+import { membersRouter } from './routes/members.js';
 import { startWorker } from './worker.js';
 import { aiConfigured, aiDescription } from './ai/extract.js';
 import { authRouter } from './routes/auth.js';
@@ -31,6 +32,7 @@ app.get('/api/health', async (req, res) => {
 });
 
 app.use('/api', authRouter);
+app.use('/api', membersRouter);
 app.use('/api', entriesRouter);
 app.use('/api', documentsRouter);
 app.use('/api', analyseRouter);

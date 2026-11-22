@@ -96,7 +96,9 @@ function mainLine(scope, lines) {
 
 async function loadEntry(req, res, next) {
   const { rows } = await query(
-    `SELECT e.* FROM entries e JOIN companies c ON c.id = e.company_id WHERE e.id = $1 AND c.user_id = $2`,
+    `SELECT e.* FROM entries e JOIN companies c ON c.id = e.company_id
+      WHERE e.id = $1 AND (c.user_id = $2 OR EXISTS (
+        SELECT 1 FROM company_members m WHERE m.company_id = c.id AND m.user_id = $2 AND m.role = 'staff'))`,
     [Number(req.params.id), req.user.id]
   );
   if (!rows[0]) return res.status(404).json({ error: 'Écriture introuvable' });

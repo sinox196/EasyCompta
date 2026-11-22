@@ -1,7 +1,7 @@
 // Service worker minimal : rend l'application de scan installable et garde
 // l'interface disponible même avec un réseau faible. Les appels /api ne sont
 // jamais mis en cache.
-const CACHE = 'easyscan-v2';
+const CACHE = 'easyscan-v3';
 const SHELL = ['/scan', '/scan.js', '/common.js', '/styles.css', '/brand/logo-light.png', '/brand/logo.png', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {

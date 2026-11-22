@@ -1,7 +1,8 @@
 import { api, esc, badge, toast, compressImage, uploadWithProgress, fmtDateTime, logo } from './common.js';
 
 const root = document.getElementById('root');
-const state = { companies: [], companyId: null, type: 'auto', pages: [], sending: false };
+// pages : document en cours de scan ; docs : documents terminés, prêts à envoyer.
+const state = { companies: [], companyId: null, type: 'auto', pages: [], docs: [], galleryMode: 'separate', sending: false };
 let pollTimer = null;
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -69,7 +70,7 @@ const TYPES = [
 
 function render() {
   if (!state.companyId) {
-    root.innerHTML = `<div class="card"><h2>Aucune société</h2><p>Créez d'abord une société sur le site EasyCompta.</p><a class="btn primary" href="/#/dossiers">Ouvrir le site</a></div>`;
+    root.innerHTML = `<div class="card"><h2>Aucune société</h2><p>Créez d'abord une société sur le site EasyCompta.</p><a class="btn primary" href="/#/clients">Ouvrir le site</a></div>`;
     return;
   }
   root.innerHTML = `
@@ -83,7 +84,7 @@ function render() {
     <div style="margin-top:12px">
       <label class="btn shoot" for="camera" style="margin:0">
         <span class="big" aria-hidden="true">📷</span>
-        ${state.pages.length ? 'Ajouter une page' : 'Scanner un document'}
+        ${state.pages.length ? `Ajouter une page (document ${state.docs.length + 1})` : state.docs.length ? 'Scanner le document suivant' : 'Scanner un document'}
         <span class="small" style="font-weight:400">facture, ticket, relevé bancaire…</span>
       </label>
       <input id="camera" type="file" accept="image/*" capture="environment" class="hidden">
@@ -91,18 +92,24 @@ function render() {
         <label class="btn gallery-btn" for="gallery">🖼 Importer depuis la galerie / PDF</label>
         <input id="gallery" type="file" accept="image/*,application/pdf" multiple class="hidden">
       </div>
+      <div class="chips gmode" role="radiogroup" aria-label="Photos de la galerie">
+        <button class="small ${state.galleryMode === 'separate' ? 'active' : ''}" data-gmode="separate">1 photo = 1 document</button>
+        <button class="small ${state.galleryMode === 'single' ? 'active' : ''}" data-gmode="single">Toutes = 1 document</button>
+      </div>
     </div>
     <div class="pages" id="pages"></div>
+    ${state.pages.length ? `<button class="next-doc" id="next-doc">✓ Document terminé — scanner le suivant</button>` : ''}
     <p class="small muted" id="hint" style="margin-top:8px"></p>
+    <div id="queue"></div>
     <div class="card recent" style="margin-top:16px">
       <h2>Derniers envois</h2>
       <ul id="recent"><li class="muted">Chargement…</li></ul>
       <p class="small muted" style="margin:8px 0 0"><a href="/#/documents">Voir tout sur le site →</a></p>
     </div>
-    <div class="sendbar ${state.pages.length ? '' : 'hidden'}" id="sendbar">
+    <div class="sendbar ${state.pages.length || state.docs.length ? '' : 'hidden'}" id="sendbar">
       <div class="inner">
         <button id="clear">Annuler</button>
-        <button class="primary" id="send">Envoyer (${state.pages.length} page${state.pages.length > 1 ? 's' : ''})</button>
+        <button class="primary" id="send">${sendLabel()}</button>
       </div>
       <div class="inner"><div class="progress" style="flex:1"><div id="bar"></div></div></div>
     </div>`;
@@ -114,72 +121,127 @@ function render() {
   });
   root.querySelectorAll('[data-type]').forEach((b) => b.addEventListener('click', () => { state.type = b.dataset.type; render(); }));
   root.querySelector('#camera').addEventListener('change', (e) => addFiles(e.target.files));
-  root.querySelector('#gallery').addEventListener('change', (e) => addFiles(e.target.files));
-  root.querySelector('#clear').addEventListener('click', () => { state.pages = []; render(); });
+  root.querySelector('#gallery').addEventListener('change', (e) => addFiles(e.target.files, true));
+  root.querySelector('#clear').addEventListener('click', () => {
+    if ((state.docs.length || state.pages.length > 1) && !confirm('Abandonner les documents scannés ?')) return;
+    [...state.pages, ...state.docs.flat()].forEach((p) => p.url && URL.revokeObjectURL(p.url));
+    state.pages = [];
+    state.docs = [];
+    render();
+  });
+  root.querySelectorAll('[data-gmode]').forEach((b) => b.addEventListener('click', () => { state.galleryMode = b.dataset.gmode; render(); }));
+  root.querySelector('#next-doc')?.addEventListener('click', finishDocument);
   root.querySelector('#send').addEventListener('click', send);
   renderPages();
   loadRecent();
 }
 
+// Documents à envoyer = documents terminés + celui en cours de scan.
+function pendingDocs() {
+  return state.pages.length ? [...state.docs, state.pages] : state.docs;
+}
+function sendLabel() {
+  const docs = pendingDocs();
+  if (docs.length > 1) return `Envoyer les ${docs.length} documents`;
+  const n = docs[0]?.length || 0;
+  return `Envoyer (${n} page${n > 1 ? 's' : ''})`;
+}
+
+function finishDocument() {
+  if (!state.pages.length) return;
+  state.docs.push(state.pages);
+  state.pages = [];
+  if (navigator.vibrate) navigator.vibrate(30);
+  render();
+}
+
+function thumb(p, i, rm) {
+  return `<div class="page">${p.url ? `<img src="${p.url}" alt="Page ${i + 1}">` : '<span>📄 PDF</span>'}<span class="n">${i + 1}</span>${rm ? `<button ${rm} aria-label="Retirer">✕</button>` : ''}</div>`;
+}
+
 function renderPages() {
   const el = root.querySelector('#pages');
-  el.innerHTML = state.pages
-    .map((p, i) => `<div class="page">${p.url ? `<img src="${p.url}" alt="Page ${i + 1}">` : '<span>📄 PDF</span>'}<span class="n">${i + 1}</span><button data-rm="${i}" aria-label="Retirer la page">✕</button></div>`)
-    .join('');
+  el.innerHTML = state.pages.map((p, i) => thumb(p, i, `data-rm="${i}"`)).join('');
   el.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', () => {
     const [p] = state.pages.splice(Number(b.dataset.rm), 1);
     if (p.url) URL.revokeObjectURL(p.url);
     render();
   }));
   root.querySelector('#hint').textContent = state.pages.length
-    ? 'Plusieurs pages = un seul document. Pour un autre document, envoyez d\'abord celui-ci.'
+    ? 'Ces photos forment un seul document (ses pages). Document suivant ? Appuyez sur « Document terminé ».'
     : '';
+  const queue = root.querySelector('#queue');
+  queue.innerHTML = state.docs.length ? `<div class="card queue-card"><h2>Prêts à envoyer (${state.docs.length})</h2>
+    ${state.docs.map((d, i) => `<div class="queue-doc"><div class="queue-head"><b>Document ${i + 1}</b><span class="muted small">${d.length} page${d.length > 1 ? 's' : ''}</span><span class="spacer"></span><button class="ghost small" data-rmdoc="${i}" aria-label="Retirer le document">✕</button></div>
+      <div class="pages mini">${d.map((p, j) => thumb(p, j)).join('')}</div></div>`).join('')}</div>` : '';
+  queue.querySelectorAll('[data-rmdoc]').forEach((b) => b.addEventListener('click', () => {
+    const [d] = state.docs.splice(Number(b.dataset.rmdoc), 1);
+    d.forEach((p) => p.url && URL.revokeObjectURL(p.url));
+    render();
+  }));
 }
 
-async function addFiles(fileList) {
+async function addFiles(fileList, fromGallery = false) {
+  const prepared = [];
   for (const f of [...fileList]) {
     try {
       const file = await compressImage(f);
-      state.pages.push({ file, url: file.type.startsWith('image/') ? URL.createObjectURL(file) : null });
+      prepared.push({ file, url: file.type.startsWith('image/') ? URL.createObjectURL(file) : null });
     } catch (err) {
       toast(`${f.name} : ${err.message}`, 'error');
+    }
+  }
+  // Galerie : chaque photo devient un document (sauf choix « pages d'un document »).
+  // Un PDF est toujours un document complet.
+  for (const p of prepared) {
+    const isPdf = p.file.type === 'application/pdf';
+    if (fromGallery && (isPdf || state.galleryMode === 'separate')) {
+      if (state.pages.length) { state.docs.push(state.pages); state.pages = []; }
+      state.docs.push([p]);
+    } else {
+      state.pages.push(p);
     }
   }
   render();
 }
 
 async function send() {
-  if (state.sending || !state.pages.length) return;
+  const docs = pendingDocs();
+  if (state.sending || !docs.length) return;
   state.sending = true;
   const btn = root.querySelector('#send');
   btn.disabled = true;
-  btn.textContent = 'Envoi…';
-  const form = new FormData();
-  state.pages.forEach((p) => form.append('files', p.file));
-  form.append('type_hint', state.type);
-  form.append('source', 'mobile');
-  // Un PDF est déjà un document complet : on envoie chaque PDF séparément.
-  form.append('mode', state.pages.some((p) => p.file.type === 'application/pdf') ? 'separate' : 'single');
-  try {
-    const res = await uploadWithProgress(`/companies/${state.companyId}/documents`, form, (p) => {
-      const bar = root.querySelector('#bar');
-      if (bar) bar.style.width = `${Math.round(p * 100)}%`;
-    });
-    if (!res.ids?.length) {
-      toast('Ce document a déjà été importé : il n\'est pas envoyé une deuxième fois.', 'error');
-    } else {
-      if (navigator.vibrate) navigator.vibrate(60);
-      showSuccess();
-      if (res.duplicates?.length) toast(`${res.duplicates.length} fichier(s) déjà importé(s) ignoré(s)`, 'error');
+  let sent = 0, dups = 0;
+  const failed = [];
+  for (let i = 0; i < docs.length; i++) {
+    btn.textContent = docs.length > 1 ? `Envoi ${i + 1}/${docs.length}…` : 'Envoi…';
+    const form = new FormData();
+    docs[i].forEach((p) => form.append('files', p.file));
+    form.append('type_hint', state.type);
+    form.append('source', 'mobile');
+    form.append('mode', 'single');
+    try {
+      const res = await uploadWithProgress(`/companies/${state.companyId}/documents`, form, (p) => {
+        const bar = root.querySelector('#bar');
+        if (bar) bar.style.width = `${Math.round(((i + p) / docs.length) * 100)}%`;
+      });
+      if (res.ids?.length) sent++; else dups++;
+      docs[i].forEach((p) => p.url && URL.revokeObjectURL(p.url));
+    } catch (err) {
+      failed.push(docs[i]);
+      toast(`Document ${i + 1} : ${err.message}`, 'error');
     }
-    state.pages.forEach((p) => p.url && URL.revokeObjectURL(p.url));
-    state.pages = [];
-  } catch (err) {
-    toast(err.message, 'error');
-  } finally {
-    state.sending = false;
-    render();
   }
+  // Les documents envoyés (ou déjà importés) quittent la file ; ceux en erreur restent pour un nouvel essai.
+  state.pages = [];
+  state.docs = failed;
+  state.sending = false;
+  if (sent) {
+    if (navigator.vibrate) navigator.vibrate(60);
+    showSuccess(sent);
+  }
+  if (dups) toast(dups > 1 ? `${dups} documents avaient déjà été importés` : 'Un document avait déjà été importé : il n\'est pas envoyé deux fois.', 'error');
+  render();
 }
 
 async function loadRecent() {
@@ -201,13 +263,13 @@ async function loadRecent() {
 }
 
 // Confirmation animée après l'envoi.
-function showSuccess() {
+function showSuccess(count = 1) {
   const el = document.createElement('div');
   el.className = 'success';
   el.innerHTML = `<div class="box">
     <svg width="76" height="76" viewBox="0 0 76 76" aria-hidden="true"><circle cx="38" cy="38" r="30" fill="none" stroke="#02a091" stroke-width="5"/>
       <path d="M25 39l9 9 18-19" fill="none" stroke="#02a091" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    <h2 style="margin:10px 0 4px">Envoyé !</h2><p class="muted" style="margin:0">L'IA s'occupe de la saisie.</p></div>`;
+    <h2 style="margin:10px 0 4px">${count > 1 ? `${count} documents envoyés !` : 'Envoyé !'}</h2><p class="muted" style="margin:0">L'IA s'occupe de la saisie.</p></div>`;
   document.body.appendChild(el);
   el.addEventListener('click', () => el.remove());
   setTimeout(() => el.remove(), 1800);

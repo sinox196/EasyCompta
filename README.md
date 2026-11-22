@@ -25,7 +25,11 @@ On scanne une facture, un ticket ou un relevé bancaire avec le téléphone. L'I
 - **Tableau de bord** : graphique du chiffre d'affaires et des charges par mois, lignes à lettrer, résumé des contrôles.
 - **Plan comptable tunisien complet** (`src/accounting/plan-tunisien.json`, comptes à 8 chiffres), propre à chaque société et modifiable. Un compte auxiliaire est ouvert automatiquement pour chaque nouveau fournisseur (4011xxxx) ou client (4111xxxx). On peut importer un plan depuis Excel ou CSV (colonnes Code, Libellé, Nature, Sens). La logique comptable raisonne par racines (« 43666 », « 626 »), traduites en comptes réels par `src/accounting/plan-resolve.js`.
 - **Suggestions dès 2 caractères** sur les comptes et les tiers (saisie, filtres, recherche).
-- **Multi-sociétés** : un cabinet peut gérer plusieurs dossiers.
+- **Cabinet multi-clients** : page « Mes clients » (tous les dossiers, documents à vérifier, en cours, clients inactifs). Chaque dossier peut être partagé par lien d'invitation (QR code, WhatsApp, e-mail) avec :
+  - le **client** : il envoie ses documents (site ou téléphone) et suit leur traitement, sans voir la comptabilité ni les autres dossiers ;
+  - un **collaborateur** du cabinet : accès complet au dossier.
+  Les droits sont vérifiés côté serveur (`src/auth.js`, `src/routes/members.js`).
+- **Envoi de nombreux documents à la fois** : sur le site, par lots, avec un résultat par fichier ; sur le téléphone, plusieurs documents de plusieurs pages chacun, envoyés d'un coup.
 - Une page **« Comment ça marche ? »** explique la comptabilité aux non-comptables.
 
 ## Architecture

@@ -14,6 +14,7 @@ const company = () => state.companies.find((c) => c.id === state.companyId);
 // --- Démarrage -----------------------------------------------------------------
 
 async function boot() {
+  if (location.pathname === '/invite') return renderInvite(new URLSearchParams(location.search).get('token'));
   try {
     const { user } = await api('/auth/me');
     state.user = user;
@@ -35,7 +36,7 @@ async function loadCompanies() {
 // Plan comptable : journaux et types (communs) + comptes de la société courante.
 async function loadPlan(force = false) {
   if (!state.plan) state.plan = await api('/plan-comptable');
-  if (state.companyId && (force || state.accountsFor !== state.companyId)) {
+  if (state.companyId && !isClient() && (force || state.accountsFor !== state.companyId)) {
     const { accounts } = await api(`/companies/${state.companyId}/accounts`);
     state.accountList = accounts;
     state.plan.accounts = Object.fromEntries(accounts.map((a) => [a.code, a.label]));
@@ -126,7 +127,18 @@ function renderAuth(mode = 'login') {
 
 // --- Squelette -----------------------------------------------------------------
 
+// Le client (espace client) ne voit que ses documents ; le cabinet voit tout.
+const CLIENT_NAV = [
+  ['dashboard', 'Mon espace'],
+  ['documents', 'Mes documents'],
+  ['telephone', 'Scanner avec mon téléphone'],
+  ['aide', 'Comment ça marche ?'],
+];
+const isClient = () => company()?.role === 'client' || (state.user?.kind === 'client' && !state.companies.some((c) => c.role !== 'client'));
+const navItems = () => (isClient() ? CLIENT_NAV : NAV);
+
 const NAV = [
+  ['clients', '👥 Mes clients'],
   ['dashboard', 'Tableau de bord'],
   ['assistant', '✨ Assistant IA'],
   ['documents', 'Documents'],
@@ -140,7 +152,6 @@ const NAV = [
   ['declaration', 'Déclaration fiscale'],
   ['tva', 'TVA de l\'année'],
   ['telephone', 'Connecter mon téléphone'],
-  ['dossiers', 'Sociétés'],
   ['aide', 'Comment ça marche ?'],
 ];
 
@@ -155,7 +166,7 @@ function renderShell() {
     <aside class="sidebar intro" id="sidebar">
       <a href="#/dashboard" aria-label="Tableau de bord">${logo('', true)}</a>
       <div>
-        <label for="company-select">Société</label>
+        <label for="company-select">${state.user.kind === 'client' ? 'Ma société' : 'Dossier client'}</label>
         <select id="company-select"></select>
       </div>
       <nav class="nav" id="nav"></nav>
@@ -185,10 +196,10 @@ function renderSidebar() {
   if (!sel) return;
   sel.innerHTML = state.companies.length
     ? state.companies.map((c) => `<option value="${c.id}" ${c.id === state.companyId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')
-    : '<option>Aucune société</option>';
+    : '<option>Aucun dossier</option>';
   const current = (location.hash.replace(/^#\/?/, '').split('/')[0]) || 'dashboard';
   const toReview = company()?.to_review || 0;
-  root.querySelector('#nav').innerHTML = NAV.map(
+  root.querySelector('#nav').innerHTML = navItems().map(
     ([id, label], i) =>
       `<a href="#/${id}" style="--i:${i}" class="${current === id ? 'active' : ''}">${label}${id === 'documents' && toReview ? `<span class="count">${toReview}</span>` : ''}</a>`
   ).join('');
@@ -200,13 +211,17 @@ function main() {
 
 async function route() {
   clearInterval(pollTimer);
+  if (uploadReport && uploadReport.at !== location.hash) uploadReport = null;
   root.querySelector('#sidebar')?.classList.remove('open');
-  const [page = 'dashboard', arg] = location.hash.replace(/^#\/?/, '').split('/');
+  let [page, arg] = location.hash.replace(/^#\/?/, '').split('/');
+  // Page d'accueil : « Mes clients » pour un cabinet qui suit plusieurs dossiers.
+  if (!page) page = !isClient() && state.companies.filter((c) => c.role !== 'client').length > 1 ? 'clients' : 'dashboard';
   renderSidebar();
-  if (!state.companyId && !['dossiers', 'aide'].includes(page)) return viewNoCompany();
+  if (!state.companyId && !['clients', 'dossiers', 'aide'].includes(page)) return viewNoCompany();
+  if (isClient() && !CLIENT_NAV.some(([id]) => id === page) && page !== 'documents') { location.hash = '#/dashboard'; return; }
   const loader = root.querySelector('#top-loader');
   loader?.classList.add('on');
-  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, assistant: viewAssistant, echeancier: viewEcheancier, etats: viewEtats, immobilisations: viewImmobilisations, controles: viewControles, plan: viewPlanComptable, telephone: viewPhone, dossiers: viewCompanies, aide: viewHelp };
+  const views = { dashboard: viewDashboard, documents: arg ? () => viewDocument(Number(arg)) : viewDocuments, journal: viewJournal, balance: viewBalance, ledger: () => viewLedger(arg), tva: viewTva, declaration: viewDeclaration, assistant: viewAssistant, echeancier: viewEcheancier, etats: viewEtats, immobilisations: viewImmobilisations, controles: viewControles, plan: viewPlanComptable, telephone: viewPhone, clients: viewClients, dossiers: viewClients, aide: viewHelp };
   try {
     await (views[page] || viewDashboard)();
   } catch (err) {
@@ -235,11 +250,12 @@ function animatePage() {
 }
 
 function viewNoCompany() {
-  main().innerHTML = `
-    <div class="card" style="max-width:560px">
+  main().innerHTML = state.user.kind === 'client'
+    ? `<div class="card" style="max-width:560px"><h1>Bienvenue 👋</h1><p>Votre comptable ne vous a pas encore donné accès à un dossier. Demandez-lui un lien d'invitation.</p></div>`
+    : `<div class="card" style="max-width:560px">
       <h1>Bienvenue 👋</h1>
-      <p>Commencez par créer la société dont vous voulez tenir la comptabilité.</p>
-      <a class="btn primary" href="#/dossiers">Ajouter une société</a>
+      <p>Commencez par ajouter votre premier client (ou votre propre société).</p>
+      <a class="btn primary" href="#/clients">Ajouter un client</a>
     </div>`;
 }
 
@@ -252,6 +268,7 @@ async function refreshCompanyCounts() {
 // --- Tableau de bord -----------------------------------------------------------
 
 async function viewDashboard() {
+  if (isClient()) return viewClientHome();
   const c = company();
   const year = new Date().getFullYear();
   const [stats, { documents, ai_ready }, evo, { checks }] = await Promise.all([
@@ -322,8 +339,12 @@ function uploadCard() {
     <h2>Ajouter des documents</h2>
     <div class="dropzone" id="dropzone">
       <div class="drop-icon" aria-hidden="true">📄</div>
-      <p><b>Glissez vos factures, tickets ou relevés bancaires ici</b><br><span class="muted small">PDF, JPG, PNG — un fichier = un document. L'IA les lit et passe les écritures automatiquement.</span></p>
+      <p><b>Glissez vos factures, tickets ou relevés bancaires ici</b> — autant que vous voulez en une fois<br><span class="muted small">PDF, JPG, PNG. L'IA les lit et passe les écritures automatiquement.</span></p>
       <div class="row" style="justify-content:center">
+        <select id="upload-mode" style="width:auto" aria-label="Regroupement des fichiers">
+          <option value="separate">Chaque fichier = un document</option>
+          <option value="single">Tous les fichiers = un seul document (plusieurs pages)</option>
+        </select>
         <select id="type-hint" style="width:auto">
           <option value="auto">Type : détection automatique</option>
           <option value="facture_achat">Factures d'achat / tickets</option>
@@ -332,33 +353,67 @@ function uploadCard() {
         </select>
         <label class="btn primary" style="margin:0;color:#fff">Choisir des fichiers<input type="file" id="file-input" multiple accept="image/*,application/pdf" class="hidden"></label>
       </div>
-      <div id="upload-status" class="small muted" style="margin-top:8px"></div>
+      <div id="upload-status" class="small muted" style="margin-top:8px">${esc(uploadReport?.status || '')}</div>
+      <div class="progress hidden" id="upload-progress"><div></div></div>
+      <ul class="upload-list" id="upload-list">${uploadReport?.list || ''}</ul>
     </div>
   </div>`;
 }
+
+// Résultat du dernier envoi, conservé quand la page se rafraîchit (documents en cours).
+let uploadReport = null;
 
 function bindUpload(after) {
   const zone = main().querySelector('#dropzone');
   const input = main().querySelector('#file-input');
   const status = main().querySelector('#upload-status');
+  const list = main().querySelector('#upload-list');
+  const bar = main().querySelector('#upload-progress');
+  const BATCH = 8; // fichiers par envoi : de gros lots passent aussi sur une connexion lente
   const send = async (fileList) => {
-    const files = [...fileList];
+    const files = [...fileList].filter((f) => f.type.startsWith('image/') || f.type === 'application/pdf');
     if (!files.length) return;
-    status.textContent = 'Préparation…';
-    const form = new FormData();
-    for (const f of files) form.append('files', await compressImage(f));
-    form.append('type_hint', main().querySelector('#type-hint').value);
-    form.append('mode', 'separate');
-    try {
-      const res = await uploadWithProgress(`/companies/${state.companyId}/documents`, form, (p) => (status.textContent = `Envoi… ${Math.round(p * 100)} %`));
-      const dup = res.duplicates?.length || 0;
-      status.textContent = dup ? `Déjà importé(s), ignoré(s) : ${res.duplicates.map((d) => d.name).join(', ')}` : '';
-      if (res.ids.length) toast(`${res.ids.length} document(s) envoyé(s). L'IA s'en occupe.${dup ? ` ${dup} doublon(s) ignoré(s).` : ''}`);
-      else toast(dup > 1 ? 'Ces documents ont déjà été importés.' : 'Ce document a déjà été importé.', 'error');
-      after();
-    } catch (err) {
-      status.textContent = err.message;
+    const mode = main().querySelector('#upload-mode').value;
+    const typeHint = main().querySelector('#type-hint').value;
+    // En mode « un seul document », tout part dans un seul envoi.
+    const batches = mode === 'single' ? [files] : Array.from({ length: Math.ceil(files.length / BATCH) }, (_, i) => files.slice(i * BATCH, (i + 1) * BATCH));
+    list.innerHTML = files.map((f, i) => `<li data-f="${i}"><span class="t">${esc(f.name)}</span><span class="badge pending">En attente</span></li>`).join('');
+    bar.classList.remove('hidden');
+    let done = 0, sent = 0, dups = 0, failed = 0;
+    const mark = (i, cls, label) => { const li = list.querySelector(`[data-f="${i}"] .badge`); if (li) { li.className = `badge ${cls}`; li.textContent = label; } };
+    for (const batch of batches) {
+      const first = files.indexOf(batch[0]);
+      status.textContent = `Préparation des fichiers ${first + 1} à ${first + batch.length} sur ${files.length}…`;
+      const form = new FormData();
+      for (const f of batch) form.append('files', await compressImage(f));
+      form.append('type_hint', typeHint);
+      form.append('mode', mode);
+      batch.forEach((_, j) => mark(first + j, 'processing', 'Envoi…'));
+      try {
+        const res = await uploadWithProgress(`/companies/${state.companyId}/documents`, form, (p) => {
+          bar.firstElementChild.style.width = `${Math.round(((done + p * batch.length) / files.length) * 100)}%`;
+        });
+        // Un résultat par document, dans l'ordre : un par fichier, ou un seul en mode « un document ».
+        batch.forEach((f, j) => {
+          const r = res.results?.[mode === 'single' ? 0 : j];
+          if (r?.duplicate) mark(first + j, 'duplicate', 'Déjà importé');
+          else mark(first + j, 'done', 'Envoyé');
+        });
+        dups += (res.results || []).filter((r) => r.duplicate).length;
+        sent += res.ids.length;
+      } catch (err) {
+        failed += batch.length;
+        batch.forEach((_, j) => mark(first + j, 'error', err.message.slice(0, 60)));
+      }
+      done += batch.length;
+      bar.firstElementChild.style.width = `${Math.round((done / files.length) * 100)}%`;
     }
+    status.textContent = `${sent} document(s) envoyé(s)${dups ? `, ${dups} déjà importé(s)` : ''}${failed ? `, ${failed} fichier(s) en erreur` : ''}.`;
+    uploadReport = { status: status.textContent, list: list.innerHTML, at: location.hash };
+    if (sent) toast(`${sent} document(s) envoyé(s). L'IA s'en occupe.`);
+    else if (dups && !failed) toast('Ces documents ont déjà été importés.', 'error');
+    input.value = '';
+    setTimeout(after, 1200);
   };
   input.addEventListener('change', () => send(input.files));
   ['dragenter', 'dragover'].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add('over'); }));
@@ -417,7 +472,7 @@ async function viewDocuments() {
     ${uploadCard()}
     <div class="card" style="margin-top:16px">
       <div class="row" style="margin-bottom:10px">${filters.map(([v, l]) => `<button class="${docFilter === v ? 'primary' : ''}" data-filter="${v}">${l}</button>`).join('')}
-        ${documents.some((d) => d.status === 'error') ? '<span class="spacer"></span><button id="retry-errors">↻ Relancer les documents en erreur</button>' : ''}</div>
+        ${!isClient() && documents.some((d) => d.status === 'error') ? '<span class="spacer"></span><button id="retry-errors">↻ Relancer les documents en erreur</button>' : ''}</div>
       ${documentsTable(documents)}
     </div>`;
   main().querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => { docFilter = b.dataset.filter; viewDocuments(); }));
@@ -438,7 +493,9 @@ async function viewDocuments() {
 }
 
 async function viewDocument(id) {
-  const [{ document: doc, pages, entries }, plan] = await Promise.all([api(`/documents/${id}`), loadPlan()]);
+  const data = await api(`/documents/${id}`);
+  if (data.role === 'client') return viewClientDocument(data);
+  const [{ document: doc, pages, entries }, plan] = [data, await loadPlan()];
   const x = doc.extracted || {};
   const inv = x.invoice || {};
   const isBank = x.doc_type === 'releve_bancaire';
@@ -1079,51 +1136,6 @@ async function viewPhone() {
   });
 }
 
-// --- Sociétés ------------------------------------------------------------------
-
-async function viewCompanies() {
-  await refreshCompanyCounts();
-  const salesLabel = { services: 'Prestations de services (706)', marchandises: 'Vente de marchandises (707)', produits: 'Vente de produits fabriqués (701)' };
-  const form = (c = {}) => `
-    <form class="company-form" data-id="${c.id || ''}">
-      <div class="grid-2">
-        <div class="field"><label>Raison sociale</label><input name="name" value="${esc(c.name)}" required></div>
-        <div class="field"><label>Matricule fiscal</label><input name="matricule_fiscal" value="${esc(c.matricule_fiscal)}" placeholder="1234567/A/M/000"></div>
-        <div class="field"><label>Activité</label><input name="activity" value="${esc(c.activity)}" placeholder="ex. agence web, commerce de détail…"></div>
-        <div class="field"><label>Ce que vend la société</label><select name="sales_type">${Object.entries(salesLabel).map(([k, l]) => `<option value="${k}" ${c.sales_type === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
-      </div>
-      <div class="row"><button class="primary">${c.id ? 'Enregistrer' : 'Ajouter la société'}</button>${c.id ? '<button type="button" class="danger ghost" data-delete>Supprimer</button>' : ''}</div>
-    </form>`;
-  main().innerHTML = `
-    <div class="page-head"><h1>Sociétés</h1></div>
-    <p class="muted">Un cabinet peut gérer plusieurs sociétés : chaque société a ses propres documents et sa propre comptabilité.</p>
-    <div class="stack">
-      ${state.companies.map((c) => `<div class="card"><div class="row" style="margin-bottom:8px"><h2 style="margin:0">${esc(c.name)}</h2><span class="muted small">${c.documents} document(s)</span></div>${form(c)}</div>`).join('')}
-      <div class="card"><h2>Nouvelle société</h2>${form()}</div>
-    </div>`;
-  main().querySelectorAll('.company-form').forEach((f) => {
-    f.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const body = Object.fromEntries(new FormData(f));
-      try {
-        const res = f.dataset.id
-          ? await api(`/companies/${f.dataset.id}`, { method: 'PUT', body })
-          : await api('/companies', { method: 'POST', body });
-        if (!f.dataset.id) { state.companyId = res.company.id; store('ec_company', String(res.company.id)); }
-        toast('Société enregistrée');
-        viewCompanies();
-      } catch (err) { toast(err.message, 'error'); }
-    });
-    f.querySelector('[data-delete]')?.addEventListener('click', async () => {
-      if (!confirm('Supprimer cette société, tous ses documents et toutes ses écritures ?')) return;
-      await api(`/companies/${f.dataset.id}`, { method: 'DELETE' });
-      if (state.companyId === Number(f.dataset.id)) state.companyId = null;
-      await loadCompanies();
-      viewCompanies();
-    });
-  });
-}
-
 // --- Aide ----------------------------------------------------------------------
 
 function viewHelp() {
@@ -1138,6 +1150,7 @@ function viewHelp() {
       <li><b>Écritures automatiques</b> : le logiciel crée les écritures selon le plan comptable tunisien, toujours équilibrées (total débit = total crédit).</li>
       <li><b>Contrôle</b> : si tout est cohérent, c'est <span class="badge done">Comptabilisé</span>. En cas de doute (photo floue, totaux qui ne collent pas…), le document passe <span class="badge review">À vérifier</span> avec l'explication.</li>
       <li><b>Apprentissage</b> : si vous corrigez le compte d'un fournisseur, EasyCompta le retient pour ses prochaines factures.</li>
+      <li><b>Plusieurs clients</b> : chaque client a son dossier (page « Mes clients »). Invitez-le avec un lien : il envoie lui-même ses factures depuis son téléphone et ne voit que son dossier.</li>
       <li><b>Lettrage</b> : chaque paiement trouvé sur un relevé bancaire est relié à sa facture. L'<b>échéancier</b> montre qui vous doit de l'argent et qui vous devez payer.</li>
       <li><b>Immobilisations</b> : un achat de matériel durable est amorti automatiquement sur plusieurs années.</li>
       <li><b>Contrôles</b> : EasyCompta signale les doublons, les relevés manquants, les factures en retard…</li>
@@ -1511,6 +1524,326 @@ async function viewPlanComptable() {
   main().querySelector('#plan-export').addEventListener('click', () => {
     downloadCSV(`plan-comptable-${c.name}`, ['Code', 'Libelle', 'Nature', 'Sens'],
       shown.map((a) => [a.code, a.label, a.nature === 'R' ? 'Regroupement' : 'Comptable', a.sens]));
+  });
+}
+
+// --- Fenêtre générique -----------------------------------------------------------------
+
+function openModal(title, html, { width = 720 } = {}) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}" style="max-width:${width}px">
+    <header><h2>${esc(title)}</h2><span class="spacer"></span><button class="ghost" data-close aria-label="Fermer">✕</button></header>
+    <div class="modal-body">${html}</div></div>`;
+  document.body.appendChild(wrap);
+  const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  wrap.addEventListener('click', (e) => { if (e.target === wrap || e.target.closest('[data-close]')) close(); });
+  return { el: wrap, close };
+}
+
+// --- Mes clients (cabinet) ---------------------------------------------------------------
+
+const SALES_LABEL = { services: 'Prestations de services (705)', marchandises: 'Vente de marchandises (707)', produits: 'Vente de produits fabriqués (701)' };
+const clientsFilter = { q: '', only: '' };
+
+function sinceText(date) {
+  if (!date) return 'Aucun document';
+  const days = Math.floor((Date.now() - new Date(date).getTime()) / 86400000);
+  if (days <= 0) return 'Dernier document aujourd\'hui';
+  if (days === 1) return 'Dernier document hier';
+  return `Dernier document il y a ${days} j`;
+}
+
+async function viewClients() {
+  await refreshCompanyCounts();
+  const list = state.companies;
+  const cabinet = list.filter((c) => c.role !== 'client');
+  const total = (k) => cabinet.reduce((sum, c) => sum + (c[k] || 0), 0);
+  const quiet = cabinet.filter((c) => !c.last_30_days).length;
+  const render = () => {
+    const q = clientsFilter.q.trim().toLowerCase();
+    const shown = cabinet
+      .filter((c) => !q || [c.name, c.matricule_fiscal, c.activity].join(' ').toLowerCase().includes(q))
+      .filter((c) => !clientsFilter.only || (clientsFilter.only === 'todo' ? c.to_review || c.errors : !c.last_30_days))
+      .sort((a, b) => (b.to_review + b.errors) - (a.to_review + a.errors) || a.name.localeCompare(b.name));
+    main().querySelector('#client-grid').innerHTML = shown.map((c) => `
+      <div class="card client-card hoverable ${c.id === state.companyId ? 'current' : ''}">
+        <div class="row" style="align-items:flex-start;flex-wrap:nowrap">
+          <div class="client-avatar" aria-hidden="true">${esc(c.name.trim().slice(0, 2).toUpperCase())}</div>
+          <div style="flex:1;min-width:0">
+            <h3 style="margin:0">${esc(c.name)}</h3>
+            <div class="small muted">${esc(c.matricule_fiscal || 'Matricule fiscal non renseigné')}${c.activity ? ` · ${esc(c.activity)}` : ''}</div>
+          </div>
+          ${c.role === 'staff' ? '<span class="badge pending" style="animation:none">collaborateur</span>' : ''}
+        </div>
+        <div class="row small" style="margin:12px 0 4px;gap:6px">
+          ${c.to_review ? `<span class="badge review">${c.to_review} à vérifier</span>` : ''}
+          ${c.in_progress ? `<span class="badge processing">${c.in_progress} en cours</span>` : ''}
+          ${c.errors ? `<span class="badge error">${c.errors} en erreur</span>` : ''}
+          ${!c.to_review && !c.in_progress && !c.errors && c.documents ? '<span class="badge done">À jour</span>' : ''}
+          <span class="muted">${c.documents} document(s)</span>
+        </div>
+        <div class="small muted">${sinceText(c.last_document)} · ${c.client_users ? `👤 ${c.client_users} accès client` : 'Client pas encore invité'}</div>
+        <div class="row" style="margin-top:12px">
+          <button class="primary small" data-open="${c.id}">Ouvrir le dossier</button>
+          <button class="small" data-invite="${c.id}">👤 Accès client</button>
+          <button class="ghost small" data-edit="${c.id}" title="Modifier">✎</button>
+        </div>
+      </div>`).join('') || `<div class="card muted">${cabinet.length ? 'Aucun client ne correspond.' : 'Aucun client pour l\'instant : ajoutez le premier.'}</div>`;
+    main().querySelectorAll('[data-only]').forEach((b) => b.classList.toggle('active', b.dataset.only === clientsFilter.only));
+    main().querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => {
+      state.companyId = Number(b.dataset.open);
+      store('ec_company', String(state.companyId));
+      location.hash = '#/dashboard';
+    }));
+    main().querySelectorAll('[data-invite]').forEach((b) => b.addEventListener('click', () => openAccessModal(list.find((c) => c.id === Number(b.dataset.invite)))));
+    main().querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => openClientModal(list.find((c) => c.id === Number(b.dataset.edit)))));
+  };
+  main().innerHTML = `
+    <div class="page-head"><h1>Mes clients</h1><span class="muted">${cabinet.length} dossier(s)</span><span class="spacer"></span>
+      <button class="primary" id="new-client">＋ Nouveau client</button></div>
+    <div class="kpis" style="margin-bottom:16px">
+      <div class="card kpi hero"><div class="label">Clients</div><div class="value" data-count="${cabinet.length}">${cabinet.length}</div></div>
+      <div class="card kpi hoverable"><div class="label">Documents à vérifier</div><div class="value" style="color:var(--warn)" data-count="${total('to_review')}">${total('to_review')}</div></div>
+      <div class="card kpi hoverable"><div class="label">En cours de lecture</div><div class="value" data-count="${total('in_progress')}">${total('in_progress')}</div></div>
+      <div class="card kpi hoverable"><div class="label">Sans document depuis 30 j</div><div class="value" data-count="${quiet}">${quiet}</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px"><div class="filters">
+      <div style="flex:1"><label for="client-q">Rechercher un client</label><input type="search" id="client-q" placeholder="Nom, matricule fiscal, activité…" value="${esc(clientsFilter.q)}"></div>
+      <div class="chip-filter">${[['', 'Tous'], ['todo', 'À traiter'], ['quiet', 'Sans document récent']].map(([k, l]) => `<button class="small" data-only="${k}">${l}</button>`).join('')}</div>
+    </div></div>
+    <div class="client-grid" id="client-grid"></div>`;
+  render();
+  const qi = main().querySelector('#client-q');
+  qi.addEventListener('input', () => { clientsFilter.q = qi.value; render(); });
+  autocomplete(qi, { source: () => cabinet.map((c) => ({ value: '', label: c.name, hint: c.matricule_fiscal || '', fill: c.name })) });
+  main().querySelectorAll('[data-only]').forEach((b) => b.addEventListener('click', () => { clientsFilter.only = b.dataset.only; render(); }));
+  main().querySelector('#new-client').addEventListener('click', () => openClientModal(null));
+}
+
+function openClientModal(c) {
+  const isNew = !c;
+  c = c || {};
+  const m = openModal(isNew ? 'Nouveau client' : `Modifier ${c.name}`, `
+    <form id="client-form" style="padding:18px 20px">
+      <div class="grid-2">
+        <div class="field"><label for="cf-name">Raison sociale</label><input id="cf-name" name="name" value="${esc(c.name)}" required></div>
+        <div class="field"><label for="cf-mf">Matricule fiscal</label><input id="cf-mf" name="matricule_fiscal" value="${esc(c.matricule_fiscal)}" placeholder="1234567/A/M/000"></div>
+        <div class="field"><label for="cf-act">Activité</label><input id="cf-act" name="activity" value="${esc(c.activity)}" placeholder="ex. pharmacie, commerce de détail…"></div>
+        <div class="field"><label for="cf-sales">Ce que vend la société</label><select id="cf-sales" name="sales_type">${Object.entries(SALES_LABEL).map(([k, l]) => `<option value="${k}" ${c.sales_type === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      </div>
+      <p class="small muted">Chaque client a son propre dossier : ses documents, son plan comptable et sa comptabilité sont séparés des autres.</p>
+      <div class="row"><span class="spacer"></span>
+        ${!isNew && c.role === 'owner' ? '<button type="button" class="danger ghost" id="cf-delete">Supprimer le dossier</button>' : ''}
+        <button type="button" data-close>Annuler</button><button class="primary">${isNew ? 'Créer le dossier' : 'Enregistrer'}</button></div>
+    </form>`, { width: 760 });
+  m.el.querySelector('#client-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target));
+    try {
+      const res = isNew ? await api('/companies', { method: 'POST', body }) : await api(`/companies/${c.id}`, { method: 'PUT', body });
+      if (isNew) { state.companyId = res.company.id; store('ec_company', String(res.company.id)); }
+      m.close();
+      toast(isNew ? 'Dossier client créé' : 'Client enregistré');
+      if (isNew) openAccessModal(res.company, true);
+      viewClients();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  m.el.querySelector('#cf-delete')?.addEventListener('click', async () => {
+    if (!confirm(`Supprimer le dossier ${c.name}, tous ses documents et toutes ses écritures ?`)) return;
+    await api(`/companies/${c.id}`, { method: 'DELETE' });
+    m.close();
+    if (state.companyId === c.id) state.companyId = null;
+    await loadCompanies();
+    renderSidebar();
+    viewClients();
+  });
+}
+
+// Accès au dossier : inviter le client (ou un collaborateur), voir et retirer les accès.
+async function openAccessModal(c, justCreated = false) {
+  const m = openModal(`Accès au dossier ${c.name}`, '<div style="padding:18px 20px" id="access-body">Chargement…</div>', { width: 820 });
+  const body = m.el.querySelector('#access-body');
+  const load = async () => {
+    const { owner, members, invitations } = await api(`/companies/${c.id}/members`);
+    const roleLabel = { owner: 'Cabinet (propriétaire)', staff: 'Collaborateur', client: 'Client' };
+    body.innerHTML = `
+      ${justCreated ? '<div class="alert info">Dossier créé ✓ Invitez maintenant votre client : il pourra scanner et envoyer ses documents lui-même, depuis son téléphone.</div>' : ''}
+      <div class="grid-2">
+        <div>
+          <h3>Inviter</h3>
+          <div class="field"><label for="inv-role">Qui ?</label><select id="inv-role">
+            <option value="client">Le client — envoie ses documents et suit leur traitement</option>
+            <option value="staff">Un collaborateur du cabinet — accès complet au dossier</option></select></div>
+          <div class="field"><label for="inv-label">Nom (facultatif)</label><input id="inv-label" placeholder="ex. M. Ben Salah, gérant"></div>
+          <button class="primary" id="inv-create">Créer le lien d'invitation</button>
+          <div id="inv-result"></div>
+        </div>
+        <div>
+          <h3>Personnes ayant accès</h3>
+          <ul class="checks">
+            ${owner ? `<li class="check"><span>🏢</span><div><b>${esc(owner.name || owner.email)}</b><div class="small muted">${esc(owner.email)} · ${roleLabel.owner}</div></div></li>` : ''}
+            ${members.map((u) => `<li class="check"><span>${u.role === 'client' ? '👤' : '🧑‍💼'}</span><div><b>${esc(u.name || u.email)}</b><div class="small muted">${esc(u.email)} · ${roleLabel[u.role] || u.role}</div></div>
+              <button class="ghost small danger" data-revoke="${u.id}">Retirer</button></li>`).join('')}
+          </ul>
+          ${invitations.length ? `<h3 style="margin-top:14px">Invitations en attente</h3><ul class="checks">${invitations.map((i) => `<li class="check"><span>✉️</span><div><b>${esc(i.label || roleLabel[i.role])}</b>
+            <div class="small muted">${roleLabel[i.role]} · valable jusqu'au ${fmtDate(i.expires_at)}</div></div>
+            <button class="ghost small" data-copy="${esc(i.url)}">Copier</button><button class="ghost small danger" data-cancel="${esc(i.token)}">Annuler</button></li>`).join('')}</ul>` : ''}
+        </div>
+      </div>`;
+    body.querySelector('#inv-create').addEventListener('click', async () => {
+      const role = body.querySelector('#inv-role').value;
+      const r = await api(`/companies/${c.id}/invitations`, { method: 'POST', body: { role, label: body.querySelector('#inv-label').value } });
+      const msg = role === 'client'
+        ? `Bonjour, voici votre accès EasyCompta pour envoyer vos factures et relevés à votre comptable (${c.name}) : ${r.url}`
+        : `Accès au dossier ${c.name} sur EasyCompta : ${r.url}`;
+      body.querySelector('#inv-result').innerHTML = `
+        <div class="invite-box">
+          <div class="qr-box">${r.qr}</div>
+          <input readonly value="${esc(r.url)}" id="inv-url" aria-label="Lien d'invitation">
+          <div class="row" style="margin-top:8px">
+            <button class="small" id="inv-copy">📋 Copier le lien</button>
+            <a class="btn small" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msg)}">WhatsApp</a>
+            <a class="btn small" href="mailto:?subject=${encodeURIComponent('Votre accès EasyCompta')}&body=${encodeURIComponent(msg)}">E-mail</a>
+          </div>
+          <p class="small muted" style="margin:8px 0 0">Lien à usage unique, valable 14 jours. Le client peut aussi scanner le QR code avec son téléphone.</p>
+        </div>`;
+      body.querySelector('#inv-copy').addEventListener('click', () => copyText(r.url));
+    });
+    body.querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', () => copyText(b.dataset.copy)));
+    body.querySelectorAll('[data-cancel]').forEach((b) => b.addEventListener('click', async () => {
+      await api(`/companies/${c.id}/invitations/${encodeURIComponent(b.dataset.cancel)}`, { method: 'DELETE' });
+      load();
+    }));
+    body.querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => {
+      if (!confirm('Retirer l\'accès de cette personne au dossier ?')) return;
+      await api(`/companies/${c.id}/members/${b.dataset.revoke}`, { method: 'DELETE' });
+      toast('Accès retiré');
+      load();
+    }));
+  };
+  try { await load(); } catch (err) { body.innerHTML = `<div class="alert error">${esc(err.message)}</div>`; }
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast('Lien copié'); } catch { prompt('Copiez le lien :', text); }
+}
+
+// --- Espace client ---------------------------------------------------------------------
+
+async function viewClientHome() {
+  const c = company();
+  const { documents } = await api(`/companies/${c.id}/documents?limit=15`);
+  const month = new Date().toISOString().slice(0, 7);
+  const thisMonth = documents.filter((d) => String(d.created_at).startsWith(month)).length;
+  const inProgress = documents.filter((d) => d.status === 'pending' || d.status === 'processing').length;
+  const done = documents.filter((d) => d.status === 'done').length;
+  main().innerHTML = `
+    <div class="page-head"><h1>Bonjour ${esc(state.user.name || '')} 👋</h1><span class="muted">${esc(c.name)}</span></div>
+    <div class="alert info">Envoyez ici toutes vos pièces : factures d'achat et de vente, tickets, relevés bancaires. Votre comptable les reçoit immédiatement et l'IA en fait la saisie.</div>
+    <div class="kpis">
+      <div class="card kpi hero"><div class="label">Envoyés ce mois-ci</div><div class="value" data-count="${thisMonth}">${thisMonth}</div></div>
+      <div class="card kpi hoverable"><div class="label">En cours de lecture</div><div class="value" data-count="${inProgress}">${inProgress}</div></div>
+      <div class="card kpi hoverable"><div class="label">Traités</div><div class="value" style="color:var(--ok)" data-count="${done}">${done}</div></div>
+    </div>
+    <div class="dash-grid" style="margin-top:16px">
+      <div class="stack">
+        ${uploadCard()}
+        <div class="card"><div class="row" style="margin-bottom:8px"><h2 style="margin:0">Mes derniers envois</h2><span class="spacer"></span><a href="#/documents">Tout voir →</a></div>${documentsTable(documents)}</div>
+      </div>
+      <div class="card">
+        <h2>📱 Scanner avec mon téléphone</h2>
+        <p class="muted small">Scannez ce QR code avec l'appareil photo de votre téléphone : vous pourrez photographier vos factures directement.</p>
+        <div id="qr-slot" class="qr-box"><span class="muted small">Génération…</span></div>
+      </div>
+    </div>`;
+  bindUpload(() => viewClientHome());
+  bindDocRows();
+  generateQr(main().querySelector('#qr-slot'));
+  if (inProgress) pollTimer = setInterval(() => softRefresh(viewClientHome), 5000);
+}
+
+function viewClientDocument({ document: doc, pages }) {
+  const x = doc.extracted || {};
+  const inv = x.invoice || {};
+  const preview = pages.map((p) => (p.mime === 'application/pdf'
+    ? `<iframe src="/api/documents/${doc.id}/pages/${p.page_no}" title="Page ${p.page_no}"></iframe>`
+    : `<img src="/api/documents/${doc.id}/pages/${p.page_no}" alt="Page ${p.page_no}" loading="lazy">`)).join('');
+  const statusText = {
+    pending: 'Votre document est dans la file : l\'IA va le lire dans un instant.',
+    processing: 'L\'IA est en train de lire votre document.',
+    done: 'Document lu et transmis à votre comptable ✓',
+    review: 'Document lu ; votre comptable va vérifier quelques points.',
+    duplicate: 'Ce document avait déjà été envoyé : il n\'est pas compté deux fois.',
+    error: 'Le document n\'a pas pu être lu. Votre comptable est prévenu ; vous pouvez aussi le renvoyer avec une photo plus nette.',
+  };
+  main().innerHTML = `
+    <div class="page-head"><a href="#/documents" class="btn">← Mes documents</a><h1>${esc(doc.summary || doc.original_name)}</h1>${badge(doc.status)}</div>
+    <div class="doc-grid">
+      <div class="card preview">${preview}</div>
+      <div class="stack">
+        <div class="alert ${doc.status === 'error' ? 'error' : doc.status === 'done' ? 'info' : 'warn'}">${statusText[doc.status] || ''}</div>
+        ${doc.extracted && x.doc_type !== 'releve_bancaire' ? `<div class="card"><h2>Ce que l'IA a lu</h2><dl class="kv">
+          <dt>Type</dt><dd>${esc(DOC_TYPE_LABELS[x.doc_type] || x.doc_type)}</dd>
+          <dt>Fournisseur</dt><dd>${esc(inv.supplier_name)}</dd>
+          <dt>Client</dt><dd>${esc(inv.customer_name)}</dd>
+          <dt>N° / date</dt><dd>${esc(inv.number)} — ${fmtDate(inv.date)}</dd>
+          <dt>Total TTC</dt><dd class="mono">${money(inv.total_ttc)} DT</dd></dl></div>` : ''}
+        ${x.doc_type === 'releve_bancaire' ? `<div class="card"><h2>Relevé bancaire</h2><p>${x.bank?.transactions?.length || 0} mouvement(s) lus, du ${fmtDate(x.bank?.period_start)} au ${fmtDate(x.bank?.period_end)}.</p></div>` : ''}
+        <p class="small muted">Envoyé le ${fmtDateTime(doc.created_at)} ${doc.source === 'mobile' ? 'depuis le téléphone' : 'depuis le site'}.</p>
+      </div>
+    </div>`;
+  if (doc.status === 'pending' || doc.status === 'processing') {
+    pollTimer = setInterval(async () => {
+      const d = await api(`/documents/${doc.id}`).catch(() => null);
+      if (d && d.document.status !== doc.status) { clearInterval(pollTimer); viewClientDocument(d); }
+    }, 4000);
+  }
+}
+
+// --- Invitation (lien reçu par le client ou un collaborateur) --------------------------------
+
+async function renderInvite(token, mode = 'new', error = '') {
+  let info;
+  try { info = await api(`/invitations/${encodeURIComponent(token || '')}`); } catch (err) { info = { error: err.message }; }
+  root.innerHTML = `
+  <div class="auth-wrap">
+    <section class="auth-hero">
+      <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+      ${logo('', true)}
+      <h1>${info.error ? 'Invitation' : `${esc(info.inviter_name || 'Votre comptable')} vous invite sur EasyCompta`}</h1>
+      <p class="lead">${info.error ? '' : info.role === 'client'
+        ? `Envoyez vos factures et relevés bancaires de <b>${esc(info.company_name)}</b> en les photographiant : votre comptable les reçoit tout de suite.`
+        : `Accès complet au dossier <b>${esc(info.company_name)}</b>.`}</p>
+    </section>
+    <div class="auth-side"><div class="card auth-card">
+      <div style="text-align:center">${logo()}</div>
+      ${info.error ? `<div class="alert error" style="margin-top:14px">${esc(info.error)}</div><a class="btn primary" href="/" style="width:100%">Aller à la connexion</a>` : `
+      <div class="tabs" role="tablist">
+        <button data-mode="new" class="${mode === 'new' ? 'active' : ''}">Créer mon accès</button>
+        <button data-mode="existing" class="${mode === 'existing' ? 'active' : ''}">J'ai déjà un compte</button>
+      </div>
+      <form id="invite-form">
+        ${mode === 'new' ? '<div class="field"><label for="iv-name">Votre nom</label><input id="iv-name" name="name" autocomplete="name" required></div>' : ''}
+        <div class="field"><label for="iv-email">Email</label><input id="iv-email" name="email" type="email" autocomplete="email" required></div>
+        <div class="field"><label for="iv-pass">Mot de passe</label><input id="iv-pass" name="password" type="password" minlength="8" autocomplete="${mode === 'new' ? 'new-password' : 'current-password'}" required></div>
+        ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+        <button class="primary" style="width:100%;min-height:46px">${mode === 'new' ? 'Créer mon accès' : 'Me connecter et rejoindre'}</button>
+      </form>`}
+    </div></div>
+  </div>`;
+  root.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => renderInvite(token, b.dataset.mode)));
+  root.querySelector('#invite-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api(`/invitations/${encodeURIComponent(token)}/accept`, { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
+      store('ec_company', String(r.company_id));
+      location.href = '/#/dashboard';
+    } catch (err) {
+      renderInvite(token, mode, err.message);
+    }
   });
 }
 

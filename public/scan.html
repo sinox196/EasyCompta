@@ -53,6 +53,14 @@
     .success svg circle { stroke-dasharray: 190; stroke-dashoffset: 190; animation: draw .6s var(--ease) forwards; }
     .success svg path { stroke-dasharray: 60; stroke-dashoffset: 60; animation: draw .4s .5s var(--ease) forwards; }
     .login-card { margin-top: 8px; }
+    .next-doc { width: 100%; margin-top: 12px; min-height: 48px; border: 2px solid var(--teal); color: var(--primary); background: var(--surface); font-weight: 700; animation: pop .35s var(--ease) both; }
+    .queue-card { margin-top: 14px; animation: fadeUp .4s var(--ease) both; }
+    .queue-doc { padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .queue-doc:last-child { border-bottom: none; }
+    .queue-head { display: flex; align-items: center; gap: 8px; }
+    .pages.mini { grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 6px; }
+    .chips button.small { min-height: 32px; font-size: .82rem; }
+    .chips.gmode { justify-content: center; flex-wrap: wrap; overflow: visible; margin-top: 8px; }
   </style>
 </head>
 <body>
