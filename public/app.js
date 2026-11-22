@@ -232,7 +232,10 @@ function main() {
   return root.querySelector('#main');
 }
 
+let routeSeq = 0; // incrémenté à chaque changement de page
+
 async function route() {
+  routeSeq++;
   clearInterval(pollTimer);
   if (uploadReport && uploadReport.at !== location.hash) uploadReport = null;
   root.querySelector('#sidebar')?.classList.remove('open');
@@ -290,8 +293,8 @@ async function refreshCompanyCounts() {
 
 // --- Tableau de bord -----------------------------------------------------------
 
-async function viewDashboard() {
-  if (isClient()) return viewClientHome();
+async function viewDashboard(seq = routeSeq) {
+  if (isClient()) return viewClientHome(seq);
   const c = company();
   const year = new Date().getFullYear();
   const [stats, { documents, ai_ready }, evo, { checks }] = await Promise.all([
@@ -303,6 +306,7 @@ async function viewDashboard() {
   const issues = checks.filter((k) => k.level !== 'ok');
   const d = stats.documents;
   const inQueue = (d.pending || 0) + (d.processing || 0);
+  if (seq !== routeSeq) return; // l'utilisateur a changé de page entre-temps
   main().innerHTML = `
     <div class="page-head"><h1>${esc(c.name)}</h1><span class="muted">Exercice ${new Date().getFullYear()}</span></div>
     ${ai_ready ? '' : '<div class="alert warn">L\'IA n\'est pas encore configurée sur le serveur (variable <b>GEMINI_API_KEY</b> ou <b>ANTHROPIC_API_KEY</b>). Les documents restent en attente.</div>'}
@@ -345,13 +349,37 @@ async function viewDashboard() {
   bindUpload(() => viewDashboard());
   bindDocRows();
   generateQr(main().querySelector('#qr-slot'));
-  if (inQueue) pollTimer = setInterval(() => softRefresh(viewDashboard), 4000);
+  if (inQueue) startPolling(viewDashboard, 4000);
+  else stopPolling();
 }
 
-async function softRefresh(view) {
-  if (document.hidden) return;
+// Rafraîchissement automatique pendant que l'IA lit des documents. Une seule
+// minuterie à la fois (startPolling), jamais deux rafraîchissements en même temps,
+// et un rafraîchissement lancé avant un changement de page n'écrit rien.
+let refreshing = false;
+function startPolling(view, ms) {
+  clearInterval(pollTimer);
+  const seq = routeSeq;
+  pollTimer = setInterval(() => {
+    if (seq !== routeSeq) return clearInterval(pollTimer);
+    softRefresh(view, seq);
+  }, ms);
+}
+function stopPolling() {
+  clearInterval(pollTimer);
+}
+async function softRefresh(view, seq) {
+  if (document.hidden || refreshing) return;
+  refreshing = true;
   const y = window.scrollY;
-  await view();
+  try {
+    await view(seq);
+  } catch {
+    // Erreur réseau passagère : on réessaiera au prochain passage.
+  } finally {
+    refreshing = false;
+  }
+  if (seq !== routeSeq) return;
   window.scrollTo(0, y);
   refreshCompanyCounts().catch(() => {});
 }
@@ -387,6 +415,7 @@ function uploadCard() {
 let uploadReport = null;
 
 function bindUpload(after) {
+  const seq = routeSeq;
   const zone = main().querySelector('#dropzone');
   const input = main().querySelector('#file-input');
   const status = main().querySelector('#upload-status');
@@ -436,7 +465,7 @@ function bindUpload(after) {
     if (sent) toast(`${sent} document(s) envoyé(s). L'IA s'en occupe.`);
     else if (dups && !failed) toast('Ces documents ont déjà été importés.', 'error');
     input.value = '';
-    setTimeout(after, 1200);
+    setTimeout(() => { if (seq === routeSeq) after(); }, 1200);
   };
   input.addEventListener('change', () => send(input.files));
   ['dragenter', 'dragover'].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add('over'); }));
@@ -486,10 +515,11 @@ function bindDocRows() {
 }
 
 let docFilter = '';
-async function viewDocuments() {
+async function viewDocuments(seq = routeSeq) {
   const c = company();
   const { documents } = await api(`/companies/${c.id}/documents?limit=300${docFilter ? `&status=${docFilter}` : ''}`);
   const filters = [['', 'Tous'], ['review', 'À vérifier'], ['pending', 'En attente'], ['processing', 'En cours'], ['done', 'Comptabilisés'], ['duplicate', 'Doublons'], ['error', 'Erreurs']];
+  if (seq !== routeSeq) return;
   main().innerHTML = `
     <div class="page-head"><h1>Documents</h1><span class="spacer"></span><button id="docs-export">⬇ Exporter la liste</button></div>
     ${uploadCard()}
@@ -511,7 +541,9 @@ async function viewDocuments() {
     viewDocuments();
   });
   if (documents.some((d) => d.status === 'pending' || d.status === 'processing')) {
-    pollTimer = setInterval(() => softRefresh(viewDocuments), 4000);
+    startPolling(viewDocuments, 4000);
+  } else {
+    stopPolling();
   }
 }
 
@@ -612,9 +644,13 @@ async function viewDocument(id) {
     location.hash = '#/documents';
   });
   if (doc.status === 'pending' || doc.status === 'processing') {
+    clearInterval(pollTimer);
+    const seq = routeSeq;
     pollTimer = setInterval(async () => {
-      const { document: d } = await api(`/documents/${id}`);
-      if (d.status !== 'pending' && d.status !== 'processing') { clearInterval(pollTimer); viewDocument(id); refreshCompanyCounts(); }
+      if (seq !== routeSeq) return clearInterval(pollTimer);
+      const r = await api(`/documents/${id}`).catch(() => null);
+      if (!r || seq !== routeSeq) return;
+      if (r.document.status !== 'pending' && r.document.status !== 'processing') { clearInterval(pollTimer); viewDocument(id); refreshCompanyCounts(); }
     }, 3000);
   }
 }
@@ -1756,13 +1792,14 @@ async function copyText(text) {
 
 // --- Espace client ---------------------------------------------------------------------
 
-async function viewClientHome() {
+async function viewClientHome(seq = routeSeq) {
   const c = company();
   const { documents } = await api(`/companies/${c.id}/documents?limit=15`);
   const month = new Date().toISOString().slice(0, 7);
   const thisMonth = documents.filter((d) => String(d.created_at).startsWith(month)).length;
   const inProgress = documents.filter((d) => d.status === 'pending' || d.status === 'processing').length;
   const done = documents.filter((d) => d.status === 'done').length;
+  if (seq !== routeSeq) return;
   main().innerHTML = `
     <div class="page-head"><h1>Bonjour ${esc(state.user.name || '')} 👋</h1><span class="muted">${esc(c.name)}</span></div>
     <div class="alert info">Envoyez ici toutes vos pièces : factures d'achat et de vente, tickets, relevés bancaires. Votre comptable les reçoit immédiatement et l'IA en fait la saisie.</div>
@@ -1785,7 +1822,8 @@ async function viewClientHome() {
   bindUpload(() => viewClientHome());
   bindDocRows();
   generateQr(main().querySelector('#qr-slot'));
-  if (inProgress) pollTimer = setInterval(() => softRefresh(viewClientHome), 5000);
+  if (inProgress) startPolling(viewClientHome, 5000);
+  else stopPolling();
 }
 
 function viewClientDocument({ document: doc, pages }) {
@@ -1819,9 +1857,12 @@ function viewClientDocument({ document: doc, pages }) {
       </div>
     </div>`;
   if (doc.status === 'pending' || doc.status === 'processing') {
+    clearInterval(pollTimer);
+    const seq = routeSeq;
     pollTimer = setInterval(async () => {
+      if (seq !== routeSeq) return clearInterval(pollTimer);
       const d = await api(`/documents/${doc.id}`).catch(() => null);
-      if (d && d.document.status !== doc.status) { clearInterval(pollTimer); viewClientDocument(d); }
+      if (d && seq === routeSeq && d.document.status !== doc.status) { clearInterval(pollTimer); viewClientDocument(d); }
     }, 4000);
   }
 }
