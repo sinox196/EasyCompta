@@ -150,6 +150,28 @@ MIGRATIONS.push(`CREATE TABLE IF NOT EXISTS accounts (
    PRIMARY KEY (company_id, code)
  )`);
 MIGRATIONS.push(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS plan_version INTEGER NOT NULL DEFAULT 0`);
+// Cabinet multi-clients : accès d'autres utilisateurs à un dossier.
+//  - staff  : collaborateur du cabinet, accès complet au dossier
+//  - client : le client lui-même, qui envoie ses documents et suit leur traitement
+MIGRATIONS.push(`ALTER TABLE users ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'cabinet'`);
+MIGRATIONS.push(`CREATE TABLE IF NOT EXISTS company_members (
+   company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+   role       TEXT NOT NULL DEFAULT 'client',
+   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+   PRIMARY KEY (company_id, user_id)
+ )`);
+MIGRATIONS.push(`CREATE TABLE IF NOT EXISTS invitations (
+   token      TEXT PRIMARY KEY,
+   company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+   created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+   role       TEXT NOT NULL DEFAULT 'client',
+   label      TEXT NOT NULL DEFAULT '',
+   expires_at TIMESTAMPTZ NOT NULL,
+   used_at    TIMESTAMPTZ,
+   used_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+ )`);
 // Lettrage : même code sur une facture et son règlement.
 MIGRATIONS.push(`ALTER TABLE entry_lines ADD COLUMN IF NOT EXISTS lettrage TEXT`);
 MIGRATIONS.push(`CREATE INDEX IF NOT EXISTS entry_lines_account_idx ON entry_lines(account)`);

@@ -13,7 +13,7 @@ documentsRouter.use(requireAuth);
 const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf']);
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024, files: 30 },
+  limits: { fileSize: 20 * 1024 * 1024, files: 50 },
   fileFilter: (req, file, cb) => {
     if (ALLOWED.has(file.mimetype)) cb(null, true);
     else cb(new Error(`Format non supporté (${file.mimetype}). Utilisez JPG, PNG, WEBP ou PDF.`));
@@ -22,12 +22,21 @@ const upload = multer({
 
 // --- Sociétés (dossiers) ----------------------------------------------------
 
+// Dossiers accessibles : ceux du cabinet (créés par l'utilisateur) et ceux où il a
+// été invité (collaborateur ou client), avec un résumé pour la vue « Mes clients ».
 documentsRouter.get('/companies', async (req, res) => {
   const { rows } = await query(
-    `SELECT c.*,
+    `SELECT c.*, CASE WHEN c.user_id = $1 THEN 'owner' ELSE m.role END AS role,
             (SELECT count(*) FROM documents d WHERE d.company_id = c.id)::int AS documents,
-            (SELECT count(*) FROM documents d WHERE d.company_id = c.id AND d.status = 'review')::int AS to_review
-       FROM companies c WHERE c.user_id = $1 ORDER BY c.name`,
+            (SELECT count(*) FROM documents d WHERE d.company_id = c.id AND d.status = 'review')::int AS to_review,
+            (SELECT count(*) FROM documents d WHERE d.company_id = c.id AND d.status IN ('pending', 'processing'))::int AS in_progress,
+            (SELECT count(*) FROM documents d WHERE d.company_id = c.id AND d.status = 'error')::int AS errors,
+            (SELECT max(created_at) FROM documents d WHERE d.company_id = c.id) AS last_document,
+            (SELECT count(*) FROM documents d WHERE d.company_id = c.id AND d.created_at > now() - interval '30 days')::int AS last_30_days,
+            (SELECT count(*) FROM company_members cm WHERE cm.company_id = c.id AND cm.role = 'client')::int AS client_users
+       FROM companies c LEFT JOIN company_members m ON m.company_id = c.id AND m.user_id = $1
+      WHERE c.user_id = $1 OR m.user_id IS NOT NULL
+      ORDER BY c.name`,
     [req.user.id]
   );
   res.json({ companies: rows });
@@ -44,6 +53,7 @@ function companyFields(body) {
 }
 
 documentsRouter.post('/companies', async (req, res) => {
+  if (req.user.kind === 'client') return res.status(403).json({ error: 'Réservé au cabinet comptable' });
   const f = companyFields(req.body);
   if (!f.name) return res.status(400).json({ error: 'Nom de la société obligatoire' });
   const { rows } = await query(
@@ -65,6 +75,7 @@ documentsRouter.put('/companies/:companyId', loadCompany, async (req, res) => {
 });
 
 documentsRouter.delete('/companies/:companyId', loadCompany, async (req, res) => {
+  if (req.role !== 'owner') return res.status(403).json({ error: 'Seul le cabinet qui a créé ce dossier peut le supprimer' });
   await query('DELETE FROM companies WHERE id = $1', [req.company.id]);
   res.json({ ok: true });
 });
@@ -72,7 +83,7 @@ documentsRouter.delete('/companies/:companyId', loadCompany, async (req, res) =>
 // --- Documents ----------------------------------------------------------------
 
 documentsRouter.post('/companies/:companyId/documents', loadCompany, (req, res, next) => {
-  upload.array('files', 30)(req, res, async (err) => {
+  upload.array('files', 50)(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
     try {
       const files = req.files || [];
@@ -93,6 +104,7 @@ documentsRouter.post('/companies/:companyId/documents', loadCompany, (req, res, 
         return h.digest('hex');
       };
       const duplicates = [];
+      const results = []; // un résultat par document, dans l'ordre d'envoi
       const ids = await withTransaction(async (client) => {
         const created = [];
         const seen = new Set();
@@ -105,6 +117,7 @@ documentsRouter.post('/companies/:companyId/documents', loadCompany, (req, res, 
           );
           if (existing[0] || seen.has(hash)) {
             duplicates.push({ name, existing_id: existing[0]?.id || null });
+            results.push({ name, duplicate: true, existing_id: existing[0]?.id || null });
             continue;
           }
           seen.add(hash);
@@ -123,11 +136,12 @@ documentsRouter.post('/companies/:companyId/documents', loadCompany, (req, res, 
             ]);
           }
           created.push(rows[0].id);
+          results.push({ name, id: rows[0].id });
         }
         return created;
       });
       kickWorker();
-      res.json({ ids, duplicates, ai_ready: aiConfigured() });
+      res.json({ ids, duplicates, results, ai_ready: aiConfigured() });
     } catch (e) {
       next(e);
     }
@@ -162,13 +176,19 @@ documentsRouter.post('/companies/:companyId/documents/retry-errors', loadCompany
   res.json({ count: rowCount });
 });
 
+// Accès à un document : cabinet (propriétaire ou collaborateur) en lecture et
+// écriture ; client en lecture seule (consulter le document et son traitement).
 async function loadDocument(req, res, next) {
   const { rows } = await query(
-    `SELECT d.* FROM documents d JOIN companies c ON c.id = d.company_id
-      WHERE d.id = $1 AND c.user_id = $2`,
+    `SELECT d.*, CASE WHEN c.user_id = $2 THEN 'owner' ELSE m.role END AS access_role
+       FROM documents d JOIN companies c ON c.id = d.company_id
+       LEFT JOIN company_members m ON m.company_id = c.id AND m.user_id = $2
+      WHERE d.id = $1 AND (c.user_id = $2 OR m.user_id IS NOT NULL)`,
     [Number(req.params.id), req.user.id]
   );
   if (!rows[0]) return res.status(404).json({ error: 'Document introuvable' });
+  if (rows[0].access_role === 'client' && req.method !== 'GET') return res.status(403).json({ error: 'Réservé au cabinet comptable' });
+  req.role = rows[0].access_role;
   req.doc = rows[0];
   next();
 }
@@ -194,7 +214,8 @@ documentsRouter.get('/documents/:id', loadDocument, async (req, res) => {
     req.doc.id,
   ]);
   const entries = await entriesWithLines('e.document_id = $1', [req.doc.id]);
-  res.json({ document: req.doc, pages, entries });
+  // Le client suit le traitement de ses documents ; les écritures restent côté cabinet.
+  res.json({ document: req.doc, pages, entries: req.role === 'client' ? [] : entries, role: req.role });
 });
 
 documentsRouter.get('/documents/:id/pages/:page', loadDocument, async (req, res) => {

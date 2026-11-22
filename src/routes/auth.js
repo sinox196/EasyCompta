@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import QRCode from 'qrcode';
 import { query } from '../db.js';
-import { setSession, clearSession, requireAuth } from '../auth.js';
+import { setSession, clearSession, requireAuth, companyRole } from '../auth.js';
 import { ensurePlan } from '../accounting/plan.js';
 
 export const authRouter = Router();
@@ -43,7 +43,7 @@ authRouter.post('/auth/login', async (req, res) => {
   }
   const mobile = req.body?.device === 'mobile';
   setSession(res, user, mobile ? { days: 180, device: 'mobile' } : undefined);
-  res.json({ user: { id: user.id, email: user.email, name: user.name } });
+  res.json({ user: { id: user.id, email: user.email, name: user.name, kind: user.kind } });
 });
 
 authRouter.post('/auth/logout', (req, res) => {
@@ -52,6 +52,7 @@ authRouter.post('/auth/logout', (req, res) => {
 });
 
 authRouter.get('/auth/me', requireAuth, (req, res) => {
+  // kind : « cabinet » (comptable) ou « client » (accès limité à ses dossiers).
   res.json({ user: req.user, device: req.device });
 });
 
@@ -68,8 +69,7 @@ function publicBaseUrl(req) {
 authRouter.post('/pairing', requireAuth, async (req, res) => {
   const companyId = req.body?.company_id ? Number(req.body.company_id) : null;
   if (companyId) {
-    const { rows } = await query('SELECT 1 FROM companies WHERE id = $1 AND user_id = $2', [companyId, req.user.id]);
-    if (!rows.length) return res.status(404).json({ error: 'Société introuvable' });
+    if (!(await companyRole(req.user.id, companyId))) return res.status(404).json({ error: 'Société introuvable' });
   }
   const token = crypto.randomBytes(24).toString('base64url');
   const expires = new Date(Date.now() + 10 * 60 * 1000);
