@@ -758,10 +758,29 @@ function accountLabelOf(account) {
 
 // --- Écritures (journal) -------------------------------------------------------
 
-const period = { from: `${new Date().getFullYear()}-01-01`, to: `${new Date().getFullYear()}-12-31`, journal: '' };
+// Par défaut : toutes les dates (une facture de l'année précédente doit apparaître).
+const period = { from: '', to: '', journal: '', preset: 'all' };
+
+function presetRange(preset) {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  switch (preset) {
+    case 'year': return [`${y}-01-01`, `${y}-12-31`];
+    case 'last-year': return [`${y - 1}-01-01`, `${y - 1}-12-31`];
+    case 'month': return [iso(new Date(y, m, 1)), iso(new Date(y, m + 1, 0))];
+    case 'last-month': return [iso(new Date(y, m - 1, 1)), iso(new Date(y, m, 0))];
+    default: return ['', ''];
+  }
+}
+const PRESETS = [['all', 'Toutes les dates'], ['year', 'Cette année'], ['last-year', 'L\'année dernière'], ['month', 'Ce mois'], ['last-month', 'Mois dernier'], ['custom', 'Personnalisée']];
+
+const periodSlug = () => (period.from || period.to ? `${period.from || 'debut'}-${period.to || 'fin'}` : 'toutes-dates');
 
 function periodForm(withJournal) {
   return `<div class="row">
+    <div><label for="p-preset">Période</label><select id="p-preset">${PRESETS.map(([k, l]) => `<option value="${k}" ${period.preset === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     <div><label for="p-from">Du</label><input type="date" id="p-from" value="${period.from}"></div>
     <div><label for="p-to">Au</label><input type="date" id="p-to" value="${period.to}"></div>
     ${withJournal ? `<div><label for="p-journal">Journal</label><select id="p-journal"><option value="">Tous</option>${Object.entries(state.plan.journals).map(([k, l]) => `<option value="${k}" ${period.journal === k ? 'selected' : ''}>${k} — ${esc(l)}</option>`).join('')}</select></div>` : ''}
@@ -769,17 +788,37 @@ function periodForm(withJournal) {
 }
 
 function bindPeriod(view) {
+  main().querySelector('#p-preset')?.addEventListener('change', (e) => {
+    period.preset = e.target.value;
+    if (period.preset !== 'custom') [period.from, period.to] = presetRange(period.preset);
+    view();
+  });
   ['p-from', 'p-to', 'p-journal'].forEach((id) => main().querySelector(`#${id}`)?.addEventListener('change', (e) => {
     period[{ 'p-from': 'from', 'p-to': 'to', 'p-journal': 'journal' }[id]] = e.target.value;
+    if (id !== 'p-journal') period.preset = period.from || period.to ? 'custom' : 'all';
     view();
   }));
+}
+
+// Rien sur la période choisie mais des écritures ailleurs : on le dit, avec un bouton.
+function otherPeriodsHint(total, shown, view) {
+  if (shown || !total) return '';
+  return `<div class="alert info no-print">Aucune écriture sur cette période, mais ${total} écriture(s) existent à d'autres dates.
+    <button class="small" style="margin-left:8px" data-all-dates>Afficher toutes les dates</button></div>`;
+}
+function bindOtherPeriods(view) {
+  main().querySelector('[data-all-dates]')?.addEventListener('click', () => {
+    Object.assign(period, { from: '', to: '', preset: 'all', journal: '' });
+    journalSearch = '';
+    view();
+  });
 }
 
 async function viewJournal() {
   await loadPlan();
   const c = company();
   const qs = `from=${period.from}&to=${period.to}${period.journal ? `&journal=${period.journal}` : ''}`;
-  const { entries } = await api(`/companies/${c.id}/entries?${qs}`);
+  const { entries, total_all: totalAll } = await api(`/companies/${c.id}/entries?${qs}`);
   const q = (journalSearch || '').toLowerCase();
   const shown = q
     ? entries.filter((e) => [e.label, e.piece_ref, ...e.lines.flatMap((l) => [l.account, l.label, l.third_party])].join(' ').toLowerCase().includes(q))
@@ -799,12 +838,14 @@ async function viewJournal() {
       <a class="btn" href="/api/companies/${c.id}/export.csv?${qs}">⬇ Exporter (Excel)</a></div>
     <div class="card" style="margin-bottom:14px"><div class="filters">${periodForm(true)}
       <div><label for="j-search">Rechercher</label><input type="search" id="j-search" placeholder="Libellé, compte, tiers, pièce…" value="${esc(journalSearch)}"></div></div></div>
+    ${otherPeriodsHint(totalAll, shown.length, viewJournal)}
     <div class="card"><div class="table-wrap"><table>
       <thead><tr><th>Date</th><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" class="muted">Aucune écriture sur la période.</td></tr>'}</tbody>
+      <tbody>${rows || `<tr><td colspan="5" class="muted">Aucune écriture${journalSearch ? ` pour « ${esc(journalSearch)} »` : ''} sur la période.</td></tr>`}</tbody>
       <tfoot><tr><td colspan="3">Total (${shown.length} écritures)</td><td class="num">${money(td)}</td><td class="num">${money(tc)}</td></tr></tfoot>
     </table></div></div>`;
   bindPeriod(viewJournal);
+  bindOtherPeriods(viewJournal);
   const search = main().querySelector('#j-search');
   await loadTiers();
   autocomplete(search, { source: () => [...accountItems(false), ...tiersItems()] });
@@ -991,7 +1032,7 @@ async function viewBalance() {
   autocomplete(main().querySelector('#f-lab'), { source: () => accountItems(false), fill: 'label' });
   main().querySelectorAll('[data-cls]').forEach((b) => b.addEventListener('click', () => { balanceFilter.cls = b.dataset.cls; shown = render(); }));
   main().querySelector('#bal-export').addEventListener('click', () => {
-    downloadCSV(`balance-${c.name}-${period.from}-${period.to}`, ['Compte', 'Intitulé', 'Débit', 'Crédit', 'Solde débiteur', 'Solde créditeur'],
+    downloadCSV(`balance-${c.name}-${periodSlug()}`, ['Compte', 'Intitulé', 'Débit', 'Crédit', 'Solde débiteur', 'Solde créditeur'],
       shown.map((a) => { const so = Number(a.debit) - Number(a.credit); return [a.account, a.label, Number(a.debit), Number(a.credit), so > 0 ? so : 0, so < 0 ? -so : 0]; }));
   });
 }
@@ -1049,7 +1090,7 @@ async function viewLedger(account = '') {
   main().querySelector('#gl-q').addEventListener('input', (ev) => { ledgerFilter.q = ev.target.value; shown = render(); });
   main().querySelectorAll('[data-side]').forEach((b) => b.addEventListener('click', () => { ledgerFilter.side = b.dataset.side; shown = render(); }));
   main().querySelector('#gl-export').addEventListener('click', () => {
-    downloadCSV(`grand-livre-${c.name}-${account || 'tous'}-${period.from}-${period.to}`,
+    downloadCSV(`grand-livre-${c.name}-${account || 'tous'}-${periodSlug()}`,
       ['Compte', 'Intitulé compte', 'Date', 'Journal', 'Pièce', 'Libellé', 'Tiers', 'Débit', 'Crédit'],
       shown.map((l) => [l.account, accountLabelOf(l.account) || l.account_label, l.entry_date, l.journal, l.piece_ref, l.label, l.third_party, Number(l.debit), Number(l.credit)]));
   });
