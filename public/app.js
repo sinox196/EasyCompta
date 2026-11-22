@@ -166,8 +166,9 @@ function renderShell() {
     <aside class="sidebar intro" id="sidebar">
       <a href="#/dashboard" aria-label="Tableau de bord">${logo('', true)}</a>
       <div>
-        <label for="company-select">${state.user.kind === 'client' ? 'Ma société' : 'Dossier client'}</label>
-        <select id="company-select"></select>
+        <label for="company-search">${state.user.kind === 'client' ? 'Ma société' : 'Dossier client'}</label>
+        <div class="company-current" id="company-current"></div>
+        <input type="search" id="company-search" class="company-search" placeholder="🔍 Rechercher un client…" aria-label="Rechercher un dossier client">
       </div>
       <nav class="nav" id="nav"></nav>
       <div class="spacer"></div>
@@ -183,20 +184,42 @@ function renderShell() {
     location.hash = '';
     renderAuth();
   });
-  root.querySelector('#company-select').addEventListener('change', (e) => {
-    state.companyId = Number(e.target.value);
-    store('ec_company', String(state.companyId));
-    route();
+  // Choix du dossier : 2 lettres (nom, matricule fiscal, activité) et les clients
+  // correspondants sont proposés ; au clic sans rien taper, les premiers dossiers.
+  autocomplete(root.querySelector('#company-search'), {
+    source: () => state.companies.map((c) => ({
+      value: '', id: c.id, fill: c.name,
+      label: c.name,
+      hint: [c.matricule_fiscal, c.role === 'client' ? '' : c.to_review ? `${c.to_review} à vérifier` : '', c.id === state.companyId ? 'dossier ouvert' : ''].filter(Boolean).join(' · '),
+      search: `${c.matricule_fiscal || ''} ${c.activity || ''}`,
+    })),
+    emptyList: 8,
+    clearOnPick: true,
+    onPick: (it) => switchCompany(it.id),
   });
   renderSidebar();
 }
 
+function switchCompany(id) {
+  if (!id || id === state.companyId) return;
+  state.companyId = id;
+  store('ec_company', String(id));
+  const page = location.hash.replace(/^#\/?/, '').split('/')[0];
+  // Une page de détail (document, compte) n'existe pas dans l'autre dossier.
+  if (['documents', 'ledger'].includes(page) && location.hash.split('/').length > 2) location.hash = `#/${page}`;
+  else if (page === 'clients' || !page) location.hash = '#/dashboard';
+  else route();
+  toast(`Dossier ouvert : ${company()?.name || ''}`);
+}
+
 function renderSidebar() {
-  const sel = root.querySelector('#company-select');
-  if (!sel) return;
-  sel.innerHTML = state.companies.length
-    ? state.companies.map((c) => `<option value="${c.id}" ${c.id === state.companyId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')
-    : '<option>Aucun dossier</option>';
+  const cur = root.querySelector('#company-current');
+  if (!cur) return;
+  const c = company();
+  cur.innerHTML = c
+    ? `<div class="client-avatar sm" aria-hidden="true">${esc(c.name.trim().slice(0, 2).toUpperCase())}</div><div class="cc-text"><b>${esc(c.name)}</b>${c.matricule_fiscal ? `<span>${esc(c.matricule_fiscal)}</span>` : ''}</div>`
+    : '<span class="small">Aucun dossier</span>';
+  root.querySelector('#company-search').classList.toggle('hidden', state.companies.length < 2);
   const current = (location.hash.replace(/^#\/?/, '').split('/')[0]) || 'dashboard';
   const toReview = company()?.to_review || 0;
   root.querySelector('#nav').innerHTML = navItems().map(

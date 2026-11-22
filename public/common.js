@@ -187,7 +187,7 @@ export function suggest(items, q, limit = 12) {
   const scored = [];
   for (const it of items) {
     const v = fold(it.value);
-    const l = fold(it.label);
+    const l = fold(it.search ? `${it.label} ${it.search}` : it.label);
     let score = -1;
     if (v.startsWith(query)) score = 3 - Math.min(2, (v.length - query.length) / 8);
     else if (words.every((w) => l.includes(w) || v.includes(w))) {
@@ -211,7 +211,8 @@ function highlight(text, q) {
  * @param {HTMLInputElement} input
  * @param {{source: () => {value:string,label:string,hint?:string}[], onPick?: (item) => void, minChars?: number, fill?: 'value'|'label'}} opts
  */
-export function autocomplete(input, { source, onPick, minChars = 2, fill = 'value' }) {
+// emptyList : nombre d'éléments proposés quand le champ est vide (au clic), 0 = aucun.
+export function autocomplete(input, { source, onPick, minChars = 2, fill = 'value', emptyList = 0, clearOnPick = false }) {
   if (input.dataset.acBound) return;
   input.dataset.acBound = '1';
   input.setAttribute('autocomplete', 'off');
@@ -229,7 +230,7 @@ export function autocomplete(input, { source, onPick, minChars = 2, fill = 'valu
     box.style.minWidth = `${Math.max(r.width, 260)}px`;
   };
   const pick = (it) => {
-    input.value = it.fill ?? (fill === 'label' ? it.label : it.value);
+    input.value = clearOnPick ? '' : it.fill ?? (fill === 'label' ? it.label : it.value);
     close();
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -237,8 +238,9 @@ export function autocomplete(input, { source, onPick, minChars = 2, fill = 'valu
   };
   const render = () => {
     const q = input.value;
-    if (q.trim().length < minChars) return close();
-    items = suggest(source() || [], q);
+    if (!q.trim() && emptyList && document.activeElement === input) items = (source() || []).slice(0, emptyList);
+    else if (q.trim().length < minChars) return close();
+    else items = suggest(source() || [], q);
     if (!items.length) return close();
     if (!box) {
       box = document.createElement('div');
@@ -254,7 +256,8 @@ export function autocomplete(input, { source, onPick, minChars = 2, fill = 'valu
     place();
   };
   input.addEventListener('input', (e) => { if (e.isTrusted) { active = -1; render(); } });
-  input.addEventListener('focus', () => { if (input.value.trim().length >= minChars) render(); });
+  input.addEventListener('focus', () => { if (input.value.trim().length >= minChars || (emptyList && !input.value.trim())) render(); });
+  input.addEventListener('click', () => { if (!box && emptyList && !input.value.trim()) render(); });
   input.addEventListener('blur', () => setTimeout(close, 120));
   input.addEventListener('keydown', (e) => {
     if (!box) return;
