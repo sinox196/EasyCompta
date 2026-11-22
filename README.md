@@ -13,6 +13,7 @@ On scanne une facture, un ticket ou un relevé bancaire avec le téléphone. L'I
   - Vente : 411 / 706-707-701 + 4367 TVA collectée + 4368 timbre et FODEC
   - Relevé : une écriture par mouvement, 532 ↔ 401, 411, 627, 651, 421, 453, 436, 161, 541, 581 ou 471
   - Avoirs : écriture inversée
+- **Plusieurs documents dans un même envoi** (plusieurs factures photographiées à la suite, PDF qui en regroupe plusieurs, deux tickets sur une photo) : l'IA renvoie un élément par document, et chacun devient un document séparé avec ses pages et ses écritures (`documents.parent_id`).
 - **Contrôles automatiques** : la cohérence HT + TVA + taxes = TTC, le rapprochement du solde initial, des mouvements et du solde final du relevé, la confiance de l'IA, la lisibilité, les factures en devise. Si un point est douteux, le document passe en **À vérifier** avec une explication. Sinon il est **Comptabilisé** directement.
 - **Apprentissage** : quand on corrige le compte d'un fournisseur, d'un client ou d'un libellé bancaire, EasyCompta le retient pour les prochains documents de ce tiers.
 - **États** : journal, balance, grand livre, TVA de l'année, export CSV (s'ouvre dans Excel).

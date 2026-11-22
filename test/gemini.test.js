@@ -57,3 +57,10 @@ test('tous les modèles indisponibles : erreur réessayable conservée', async (
   ]);
   await assert.rejects(extractWithGemini('sys', pages, 'texte', schema), (e) => e.status === 503);
 });
+
+test('réponse en plusieurs documents ou ancien format', async () => {
+  const { splitExtraction } = await import('../src/ai/extract.js');
+  assert.equal(splitExtraction({ documents: [{ doc_type: 'facture_achat' }, { doc_type: 'ticket_caisse' }] }).length, 2);
+  assert.equal(splitExtraction({ doc_type: 'facture_achat' }).length, 1);
+  assert.equal(splitExtraction({ documents: [] }).length, 0);
+});

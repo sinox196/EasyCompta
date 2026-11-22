@@ -138,6 +138,8 @@ MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS file_hash TEXT`)
 MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS allow_duplicate BOOLEAN NOT NULL DEFAULT false`);
 MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS duplicate_of INTEGER`);
 MIGRATIONS.push(`CREATE INDEX IF NOT EXISTS documents_hash_idx ON documents(company_id, file_hash)`);
+// Document séparé automatiquement d'un envoi qui en contenait plusieurs.
+MIGRATIONS.push(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES documents(id) ON DELETE SET NULL`);
 // Plan comptable propre à chaque société (initialisé avec le plan tunisien).
 MIGRATIONS.push(`CREATE TABLE IF NOT EXISTS accounts (
    company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
