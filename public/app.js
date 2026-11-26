@@ -2,6 +2,10 @@ import { api, esc, money, fmtDate, fmtDateTime, badge, toast, compressImage, upl
 
 const root = document.getElementById('root');
 const state = { user: null, companies: [], companyId: null, plan: null };
+// Mode intégré : l'application affichée dans le panneau « à côté » d'un autre
+// dossier (?embed=1&company=ID). Pas de barre latérale, le dossier est imposé.
+const embedParams = new URLSearchParams(location.search);
+state.embed = embedParams.get('embed') === '1';
 let pollTimer = null;
 
 function store(key, value) {
@@ -29,8 +33,8 @@ async function boot() {
 async function loadCompanies() {
   const { companies } = await api('/companies');
   state.companies = companies;
-  const saved = Number(store('ec_company'));
-  state.companyId = companies.find((c) => c.id === saved)?.id || companies[0]?.id || null;
+  const saved = state.embed ? Number(embedParams.get('company')) : Number(store('ec_company'));
+  state.companyId = companies.find((c) => c.id === saved)?.id || (state.embed ? null : companies[0]?.id) || null;
 }
 
 // Plan comptable : journaux et types (communs) + comptes de la société courante.
@@ -78,6 +82,10 @@ window.addEventListener('hashchange', () => state.user && route());
 
 function renderAuth(mode = 'login') {
   document.body.classList.remove('peek-open');
+  if (state.embed) {
+    root.innerHTML = '<p class="muted" style="padding:20px">Session expirée : rechargez la page.</p>';
+    return;
+  }
   root.innerHTML = `
   <div class="auth-wrap">
     <section class="auth-hero">
@@ -156,6 +164,11 @@ const NAV = [
 ];
 
 function renderShell() {
+  if (state.embed) {
+    document.body.classList.add('embed');
+    root.innerHTML = '<div class="top-loader" id="top-loader"></div><main class="main" id="main"></main>';
+    return;
+  }
   root.innerHTML = `
   <div class="mobile-bar">
     <button class="ghost" id="menu-btn" aria-label="Menu">☰</button>
@@ -169,7 +182,6 @@ function renderShell() {
         <label for="company-search">${state.user.kind === 'client' ? 'Ma société' : 'Dossier client'}</label>
         <div class="company-current" id="company-current"></div>
         <input type="search" id="company-search" class="company-search" placeholder="🔍 Rechercher un client…" aria-label="Rechercher un dossier client">
-        <button class="peek-btn hidden" id="peek-btn" title="Afficher les documents d'un autre client à côté, sans quitter ce dossier"></button>
       </div>
       <nav class="nav" id="nav"></nav>
       <div class="spacer"></div>
@@ -181,7 +193,7 @@ function renderShell() {
   <button class="ai-fab hidden" id="ai-fab" aria-label="Assistant IA" title="Assistant IA"><span class="ai-fab-icon">✨</span></button>
   <section class="ai-panel hidden" id="ai-panel" role="dialog" aria-label="Assistant IA"></section>
   <aside class="peek hidden" id="peek" aria-label="Autre dossier affiché à côté"></aside>
-  <button class="peek-pill hidden" id="peek-pill" title="Réafficher l'autre dossier à côté"></button>`;
+  <button class="peek-handle hidden" id="peek-handle"></button>`;
   loadPeekState();
   bindPeekShell();
   root.querySelector('#ai-fab').addEventListener('click', () => {
@@ -209,6 +221,12 @@ function renderShell() {
     emptyList: 8,
     clearOnPick: true,
     onPick: (it) => switchCompany(it.id),
+    secondary: {
+      label: '⧉ À côté',
+      title: 'Ouvrir ce dossier à droite, sans quitter le dossier actuel (Maj + Entrée)',
+      show: () => peekAvailable(),
+      onPick: (it) => { root.querySelector('#sidebar')?.classList.remove('open'); openPeek({ companyId: it.id }); },
+    },
   });
   renderSidebar();
 }
@@ -255,6 +273,7 @@ async function route() {
   if (uploadReport && uploadReport.at !== location.hash) uploadReport = null;
   root.querySelector('#sidebar')?.classList.remove('open');
   let [page, arg] = location.hash.replace(/^#\/?/, '').split('/');
+  if (state.embed && (!page || EMBED_HIDDEN.includes(page))) { location.replace('#/documents'); return; }
   // Page d'accueil : « Mes clients » pour un cabinet qui suit plusieurs dossiers.
   if (!page) page = !isClient() && state.companies.filter((c) => c.role !== 'client').length > 1 ? 'clients' : 'dashboard';
   renderSidebar();
@@ -580,7 +599,7 @@ async function viewDocument(id) {
       <h1>${esc(doc.summary || doc.original_name)}</h1>
       ${badge(doc.status)}
       <span class="spacer"></span>
-      <button id="compare-side" title="Garder ce document ouvert et afficher un autre document (de ce client ou d'un autre) à côté">⧉ Comparer à côté</button>
+      ${peekAvailable() ? '<button id="compare-side" title="Garder ce document ouvert et afficher un autre dossier (ou un autre document de ce client) à droite">⧉ Comparer à côté</button>' : ''}
     </div>
     <div class="doc-grid">
       <div class="card preview">${preview}</div>
@@ -619,7 +638,7 @@ async function viewDocument(id) {
     </div>`;
 
   main().querySelectorAll('.entry-card').forEach(bindEntryEditor);
-  main().querySelector('#compare-side').addEventListener('click', () => openPeek());
+  main().querySelector('#compare-side')?.addEventListener('click', () => openPeek());
   main().querySelector('#validate-all')?.addEventListener('click', async () => {
     await api(`/documents/${doc.id}/validate`, { method: 'POST' });
     toast('Écritures validées');
@@ -678,67 +697,72 @@ function extractedDetails(x = {}) {
 }
 
 // --- Écran partagé : un autre dossier ouvert à côté ------------------------------
-// Le dossier de travail reste à gauche. Le panneau de droite affiche, en lecture
-// seule, les documents d'un autre client (ou un autre document du même client).
-// Il reste ouvert quand on change de page et après un rechargement. Sur grand
-// écran les deux côtés sont visibles en même temps ; sur un petit écran le
-// panneau passe par-dessus et se réduit en une pastille.
+// Le dossier de travail reste à gauche. À droite, n'importe quelle page d'un autre
+// client (documents, écritures, balance, grand livre, TVA…) : c'est l'application
+// elle-même, chargée dans un cadre en mode intégré (?embed=1&company=ID). Toutes
+// les pages y sont donc disponibles, avec les mêmes droits que d'habitude.
+// L'écran partagé reste ouvert quand on change de page et après un rechargement ;
+// sur un petit écran le panneau passe par-dessus la page.
 
-const PEEK_STATUS = [['', 'Tous'], ['review', 'À vérifier'], ['done', 'Comptabilisés'], ['pending', 'En attente'], ['duplicate', 'Doublons'], ['error', 'Erreurs']];
+const PEEK_PAGES = [
+  ['documents', 'Documents'], ['journal', 'Écritures'], ['balance', 'Balance'], ['ledger', 'Grand livre'],
+  ['dashboard', 'Tableau de bord'], ['echeancier', 'Échéancier'], ['etats', 'Bilan & résultat'], ['tva', 'TVA'],
+  ['declaration', 'Déclaration'], ['immobilisations', 'Immobilisations'], ['controles', 'Contrôles'], ['plan', 'Plan comptable'],
+];
+const EMBED_HIDDEN = ['clients', 'dossiers', 'telephone', 'aide', 'assistant'];
 const SIDEBAR_W = 260;
-const peek = { mode: 'closed', companyId: null, docId: null, status: '', q: '', zoom: 1, width: 0, recent: [], docs: null, docsFor: null };
-let peekSeq = 0;
+const peek = { mode: 'closed', companyId: null, page: '#/documents', width: 0, recent: [] };
+
+const safePage = (h) => {
+  const page = String(h || '').replace(/^#\/?/, '').split('/')[0];
+  return /^#\/[\w-]+(\/[\w.-]*)?$/.test(h || '') && !EMBED_HIDDEN.includes(page) ? h : '#/documents';
+};
 
 function loadPeekState() {
   try {
     const saved = JSON.parse(store('ec_peek') || '{}');
-    for (const k of ['mode', 'companyId', 'docId', 'status', 'zoom', 'width', 'recent']) if (saved[k] !== undefined) peek[k] = saved[k];
+    for (const k of ['mode', 'companyId', 'page', 'width', 'recent']) if (saved[k] !== undefined) peek[k] = saved[k];
   } catch { /* état illisible : valeurs par défaut */ }
   const ids = new Set(state.companies.map((c) => c.id));
-  if (!ids.has(peek.companyId)) { peek.companyId = null; peek.docId = null; }
+  if (!ids.has(peek.companyId)) peek.companyId = null;
   peek.recent = (Array.isArray(peek.recent) ? peek.recent : []).filter((id) => ids.has(id));
   if (!['open', 'min'].includes(peek.mode)) peek.mode = 'closed';
-  peek.docs = null;
-  peek.docsFor = null;
-  peek.q = '';
+  peek.page = safePage(peek.page);
 }
 
 function savePeek() {
-  const { mode, companyId, docId, status, zoom, width, recent } = peek;
-  store('ec_peek', JSON.stringify({ mode, companyId, docId, status, zoom, width, recent }));
+  const { mode, companyId, page, width, recent } = peek;
+  store('ec_peek', JSON.stringify({ mode, companyId, page, width, recent }));
 }
 
-const peekAvailable = () => Boolean(state.user && !isClient() && state.companies.some((c) => c.role !== 'client'));
+const peekAvailable = () => Boolean(state.user && !state.embed && !isClient() && state.companies.some((c) => c.role !== 'client'));
 const peekCompany = () => state.companies.find((c) => c.id === peek.companyId);
 const initials = (name) => esc(String(name || '').trim().slice(0, 2).toUpperCase());
 
 // Largeur du panneau : réglable à la souris, sans jamais écraser le dossier de travail.
 function peekWidth() {
   const avail = window.innerWidth - SIDEBAR_W;
-  const w = peek.width || Math.round(avail * 0.45);
-  return Math.max(340, Math.min(w, avail - 420));
+  const w = peek.width || Math.round(avail / 2);
+  return Math.max(360, Math.min(w, avail - 420));
 }
 
 function setPeekCompany(id) {
-  if (id !== peek.companyId) {
-    peek.docs = null;
-    peek.docsFor = null;
-    peek.status = '';
-    peek.q = '';
-    peek.docId = null;
-  }
   peek.companyId = id;
   if (id) peek.recent = [id, ...peek.recent.filter((r) => r !== id)].slice(0, 5);
 }
 
-function openPeek({ companyId, docId } = {}) {
+function openPeek({ companyId, page } = {}) {
   if (!peekAvailable()) return;
   if (companyId !== undefined) setPeekCompany(companyId);
-  if (docId !== undefined) peek.docId = docId;
+  if (page) peek.page = safePage(page);
+  const wasOpen = peek.mode === 'open';
   peek.mode = 'open';
   savePeek();
   syncPeek();
-  renderPeek().then(() => document.querySelector('#peek #peek-q')?.focus({ preventScroll: true }));
+  // Panneau déjà ouvert sur ce client : on change seulement de page, sans recharger.
+  if (wasOpen && companyId === undefined && !page) return;
+  renderPeek();
+  document.querySelector('#peek #peek-q')?.focus({ preventScroll: true });
 }
 
 function minimizePeek() {
@@ -749,15 +773,13 @@ function minimizePeek() {
 
 function closePeek() {
   peek.mode = 'closed';
-  peek.companyId = null;
-  peek.docId = null;
-  peek.docs = null;
-  peek.docsFor = null;
   savePeek();
   syncPeek();
+  const panel = document.getElementById('peek');
+  if (panel) panel.innerHTML = '';
 }
 
-// Met la page en deux colonnes (ou non) et tient à jour le bouton et la pastille.
+// Met la page en deux colonnes (ou non) et tient à jour l'onglet du bord droit.
 function syncPeek() {
   const panel = document.getElementById('peek');
   if (!panel) return;
@@ -767,34 +789,32 @@ function syncPeek() {
   panel.classList.toggle('hidden', !open);
   document.documentElement.style.setProperty('--peek-w', `${peekWidth()}px`);
   const c = peekCompany();
-  const pill = document.getElementById('peek-pill');
-  pill.classList.toggle('hidden', !(ok && peek.mode === 'min'));
-  pill.innerHTML = `<span class="peek-pill-icon" aria-hidden="true">⧉</span><span class="peek-pill-text">${c ? esc(c.name) : 'Autre dossier'}</span>`;
-  const btn = document.getElementById('peek-btn');
-  btn.classList.toggle('hidden', !ok);
-  btn.classList.toggle('active', open);
-  btn.innerHTML = open
-    ? '<span aria-hidden="true">⧉</span> Fermer l\'écran partagé'
-    : peek.mode === 'min' && c ? `<span aria-hidden="true">⧉</span> Réafficher ${esc(c.name)}` : '<span aria-hidden="true">⧉</span> Voir un autre dossier à côté';
+  const handle = document.getElementById('peek-handle');
+  handle.classList.toggle('hidden', !ok || open);
+  handle.classList.toggle('has-client', peek.mode === 'min' && Boolean(c));
+  handle.title = peek.mode === 'min' && c ? `Réafficher ${c.name} à côté` : 'Ouvrir un autre dossier client à côté de celui-ci';
+  handle.innerHTML = `<span class="peek-handle-icon" aria-hidden="true">⧉</span><span class="peek-handle-text">${peek.mode === 'min' && c ? esc(c.name) : 'Ouvrir un autre dossier'}</span>`;
 }
 
 function bindPeekShell() {
-  document.getElementById('peek-btn').addEventListener('click', () => {
-    document.getElementById('sidebar')?.classList.remove('open');
-    if (peek.mode === 'open') closePeek();
-    else openPeek();
-  });
-  document.getElementById('peek-pill').addEventListener('click', () => openPeek());
+  document.getElementById('peek-handle').addEventListener('click', () => openPeek());
   if (!window.__peekResize) {
     window.__peekResize = true;
     window.addEventListener('resize', () => document.documentElement.style.setProperty('--peek-w', `${peekWidth()}px`));
+    // Raccourci clavier : Alt + D ouvre ou ferme l'écran partagé.
+    document.addEventListener('keydown', (e) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey || e.code !== 'KeyD' || !peekAvailable()) return;
+      e.preventDefault();
+      if (peek.mode === 'open') minimizePeek(); else openPeek();
+    });
   }
   syncPeek();
   if (peek.mode === 'open') renderPeek();
 }
 
-// Le bandeau du panneau (nom du client, échanger, réduire, fermer) est le même
-// sur les trois écrans : choix du client, liste des documents, document.
+const peekPages = () => (peekCompany()?.role === 'client' ? PEEK_PAGES.filter(([id]) => ['documents', 'dashboard'].includes(id)) : PEEK_PAGES);
+const pageKey = (h) => String(h || '').replace(/^#\/?/, '').split('/')[0] || 'dashboard';
+
 function peekHeader() {
   const c = peekCompany();
   const same = c && c.id === state.companyId;
@@ -803,46 +823,44 @@ function peekHeader() {
     <header class="peek-head">
       ${c ? `<button class="peek-who" data-peek="clients" title="Changer de client">
         <span class="client-avatar sm peek-avatar" aria-hidden="true">${initials(c.name)}</span>
-        <span class="peek-who-text"><span class="peek-kicker">À côté · lecture seule${same ? ' · même dossier' : ''}</span><b>${esc(c.name)}</b></span>
+        <span class="peek-who-text"><span class="peek-kicker">À côté${same ? ' · même dossier' : ''}</span><b>${esc(c.name)}</b></span>
         <span class="peek-caret" aria-hidden="true">▾</span>
       </button>` : '<div class="peek-who static"><span class="peek-who-text"><span class="peek-kicker">Écran partagé</span><b>Choisir un dossier</b></span></div>'}
-      ${c && !same ? '<button class="ghost small" data-peek="swap" title="Travailler sur ce dossier : les deux côtés s\'échangent">⇄<span class="peek-lbl"> Échanger</span></button>' : ''}
-      <button class="ghost small" data-peek="min" title="Réduire (le panneau reste disponible en bas de l'écran)" aria-label="Réduire">–</button>
+      ${c ? '<button class="ghost small" data-peek="reload" title="Actualiser" aria-label="Actualiser">↻</button>' : ''}
+      ${c && !same ? '<button class="ghost small" data-peek="swap" title="Travailler sur ce dossier à gauche : les deux côtés s\'échangent">⇄<span class="peek-lbl"> Échanger</span></button>' : ''}
+      <button class="ghost small" data-peek="min" title="Réduire (Alt + D) : un onglet reste sur le bord droit" aria-label="Réduire">–</button>
       <button class="ghost small" data-peek="close" title="Fermer l'écran partagé" aria-label="Fermer">✕</button>
     </header>`;
 }
 
-async function renderPeek() {
+function renderPeek() {
   const panel = document.getElementById('peek');
   if (!panel || peek.mode !== 'open') return;
-  const seq = ++peekSeq;
   const c = peekCompany();
-  let body;
-  try {
-    if (!c) body = peekChooser();
-    else if (peek.docId) body = await peekDocument(seq);
-    else body = await peekList(seq);
-  } catch (err) {
-    if (err.status === 404 && peek.docId) { peek.docId = null; savePeek(); return renderPeek(); }
-    body = `<div class="peek-body"><div class="alert error">${esc(err.message)}</div><button class="small" data-peek="list">← Retour à la liste</button></div>`;
-  }
-  if (body === null || seq !== peekSeq) return;
-  panel.innerHTML = peekHeader() + body;
+  if (c && !peekPages().some(([id]) => id === pageKey(peek.page))) peek.page = '#/documents';
+  const active = pageKey(peek.page);
+  panel.innerHTML = peekHeader() + (c
+    ? `<nav class="peek-tabs" aria-label="Pages du dossier ${esc(c.name)}">${peekPages().map(([id, l]) => `<button class="${id === active ? 'active' : ''}" data-tab="${id}">${l}</button>`).join('')}</nav>
+       <div class="peek-frame"><div class="peek-loading">Chargement de ${esc(c.name)}…</div>
+       <iframe id="peek-frame" src="/?embed=1&amp;company=${c.id}${esc(peek.page)}" title="Dossier ${esc(c.name)}"></iframe></div>`
+    : peekChooser());
   bindPeek(panel);
+  panel.querySelector('.peek-tabs .active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
 }
 
-// 1. Choix du client : les dossiers consultés récemment, puis tous les dossiers.
+// Choix du client : les dossiers consultés récemment, puis tous les dossiers.
 function peekChooser() {
   return `<div class="peek-body">
-    <p class="peek-intro">Le dossier <b>${esc(company()?.name || '')}</b> reste ouvert à gauche. Choisissez ce que vous voulez voir à côté :</p>
+    <p class="peek-intro">Le dossier <b>${esc(company()?.name || '')}</b> reste ouvert à gauche. Quel dossier voulez-vous voir à côté ?</p>
     <input type="search" id="peek-q" class="peek-search" placeholder="🔍 Rechercher un client (nom, matricule, activité)…" aria-label="Rechercher un client" autocomplete="off">
     <div id="peek-clients" class="peek-clients">${peekClientItems('')}</div>
   </div>`;
 }
 
 function peekClientItems(q) {
-  const f = q.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  const match = (c) => !f || [c.name, c.matricule_fiscal, c.activity].join(' ').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').includes(f);
+  const fold = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const f = fold(q).trim();
+  const match = (c) => !f || fold([c.name, c.matricule_fiscal, c.activity].join(' ')).includes(f);
   const item = (c) => `<button class="peek-client ${c.id === state.companyId ? 'current' : ''}" data-pc="${c.id}">
       <span class="client-avatar sm" aria-hidden="true">${initials(c.name)}</span>
       <span class="peek-client-text"><b>${esc(c.name)}</b><span>${[c.matricule_fiscal, `${c.documents || 0} document(s)`, c.to_review ? `${c.to_review} à vérifier` : ''].filter(Boolean).map(esc).join(' · ')}</span></span>
@@ -856,121 +874,18 @@ function peekClientItems(q) {
     ${rest.length ? `${recent.length ? '<div class="peek-section">Tous les dossiers</div>' : ''}${rest.map(item).join('')}` : ''}`;
 }
 
-async function loadPeekDocs(seq) {
-  if (peek.docs && peek.docsFor === peek.companyId) return peek.docs;
-  const id = peek.companyId;
-  const { documents } = await api(`/companies/${id}/documents?limit=500`);
-  if (seq !== undefined && seq !== peekSeq) return null;
-  peek.docs = documents;
-  peek.docsFor = id;
-  return documents;
-}
-
-function peekFiltered() {
-  const words = peek.q.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').split(/\s+/).filter(Boolean);
-  return (peek.docs || []).filter((d) => {
-    if (peek.status && !(d.status === peek.status || (peek.status === 'pending' && d.status === 'processing'))) return false;
-    if (!words.length) return true;
-    const text = [d.summary, d.original_name, DOC_TYPE_LABELS[d.doc_type], fmtDate(d.created_at), d.id].join(' ').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-    return words.every((w) => text.includes(w));
-  });
-}
-
-// 2. Liste des documents du client, avec recherche et filtres.
-async function peekList(seq) {
-  const docs = await loadPeekDocs(seq);
-  if (!docs) return null;
-  const count = (s) => (s ? docs.filter((d) => d.status === s || (s === 'pending' && d.status === 'processing')).length : docs.length);
-  return `<div class="peek-body">
-    <div class="peek-filters">
-      <input type="search" id="peek-dq" class="peek-search" placeholder="🔍 Fournisseur, client, n°, date…" value="${esc(peek.q)}" aria-label="Rechercher un document" autocomplete="off">
-      <button class="ghost small" data-peek="refresh" title="Actualiser la liste" aria-label="Actualiser">↻</button>
-    </div>
-    <div class="chip-filter peek-chips">${PEEK_STATUS.filter(([s]) => !s || count(s)).map(([s, l]) => `<button class="small ${peek.status === s ? 'active' : ''}" data-ps="${s}">${l} <span class="peek-n">${count(s)}</span></button>`).join('')}</div>
-    <div id="peek-docs" class="peek-docs">${peekDocItems()}</div>
-  </div>`;
-}
-
-function peekDocItems() {
-  const list = peekFiltered();
-  if (!peek.docs?.length) return '<p class="muted small">Ce dossier ne contient encore aucun document.</p>';
-  if (!list.length) return '<p class="muted small">Aucun document ne correspond à la recherche.</p>';
-  return list.map((d) => `<button class="peek-doc" data-pd="${d.id}">
-      <span class="peek-doc-text"><b>${esc(d.summary || d.original_name)}</b>
-      <span>${esc(DOC_TYPE_LABELS[d.doc_type] || '')}${d.doc_type ? ' · ' : ''}reçu le ${fmtDate(d.created_at)}${d.page_count > 1 ? ` · ${d.page_count} pages` : ''}</span></span>
-      ${badge(d.status)}
-    </button>`).join('');
-}
-
-// 3. Un document : les pages (avec zoom), ce que l'IA a lu et les écritures.
-async function peekDocument(seq) {
-  const [data] = await Promise.all([api(`/documents/${peek.docId}`), loadPeekDocs(seq).catch(() => null)]);
-  if (seq !== peekSeq) return null;
-  const { document: doc, pages, entries } = data;
-  if (doc.company_id !== peek.companyId) { setPeekCompany(doc.company_id); peek.docId = doc.id; }
-  const list = peekFiltered();
-  let i = list.findIndex((d) => d.id === doc.id);
-  const nav = i >= 0 ? list : peek.docs || [];
-  if (i < 0) i = nav.findIndex((d) => d.id === doc.id);
-  const prev = i > 0 ? nav[i - 1] : null;
-  const next = i >= 0 && i < nav.length - 1 ? nav[i + 1] : null;
-  const src = (p) => `/api/documents/${doc.id}/pages/${p.page_no}`;
-  const pagesHtml = pages.map((p) => (p.mime === 'application/pdf'
-    ? `<iframe src="${src(p)}" title="Page ${p.page_no}"></iframe>`
-    : `<img src="${src(p)}" alt="Page ${p.page_no}" loading="lazy" data-zoomable title="Cliquer pour zoomer">`)).join('');
-  const entriesHtml = entries.map((e) => {
-    const d = e.lines.reduce((s, l) => s + Number(l.debit || 0), 0);
-    const c = e.lines.reduce((s, l) => s + Number(l.credit || 0), 0);
-    return `<div class="peek-entry">
-      <div class="peek-entry-head"><span class="mono">${esc(e.journal)}</span><span>${fmtDate(e.entry_date)}</span><span class="peek-entry-label">${esc(e.label)}</span>${badge(e.status)}</div>
-      <div class="table-wrap"><table class="peek-table">
-        <thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
-        <tbody>${e.lines.map((l) => `<tr><td class="mono">${esc(l.account)}</td><td>${esc(l.label)}${l.account_label ? `<div class="small muted">${esc(l.account_label)}</div>` : ''}</td>
-          <td class="num">${Number(l.debit) ? money(l.debit) : ''}</td><td class="num">${Number(l.credit) ? money(l.credit) : ''}</td></tr>`).join('')}</tbody>
-        <tfoot><tr><td></td><td></td><td class="num">${money(d)}</td><td class="num">${money(c)}</td></tr></tfoot>
-      </table></div>
-    </div>`;
-  }).join('');
-  const warnings = (doc.warnings || []).filter((w) => !w.startsWith('Note IA'));
-  return `<div class="peek-body peek-doc-view ${peek.zoom > 1 ? 'zoomed' : ''}" style="--zoom:${peek.zoom}">
-    <div class="peek-toolbar">
-      <button class="small" data-peek="list" title="Revenir à la liste des documents">← Documents</button>
-      <span class="spacer"></span>
-      <button class="ghost small" data-pd="${prev?.id || ''}" ${prev ? '' : 'disabled'} title="Document précédent" aria-label="Document précédent">‹</button>
-      ${i >= 0 ? `<span class="small muted peek-pos">${i + 1} / ${nav.length}</span>` : ''}
-      <button class="ghost small" data-pd="${next?.id || ''}" ${next ? '' : 'disabled'} title="Document suivant" aria-label="Document suivant">›</button>
-    </div>
-    <div class="peek-doc-title"><h3>${esc(doc.summary || doc.original_name)}</h3>${badge(doc.status)}</div>
-    ${pages.length ? `<div class="peek-zoom">
-      <button class="ghost small" data-zoom="-1" aria-label="Dézoomer" ${peek.zoom <= 1 ? 'disabled' : ''}>－</button>
-      <span class="small muted">${Math.round(peek.zoom * 100)} %</span>
-      <button class="ghost small" data-zoom="1" aria-label="Zoomer" ${peek.zoom >= 3 ? 'disabled' : ''}>＋</button>
-      <span class="spacer"></span>
-      <a class="small" href="${src(pages[0])}" target="_blank" rel="noopener">Ouvrir dans un onglet ↗</a>
-    </div>
-    <div class="peek-pages">${pagesHtml}</div>` : ''}
-    ${warnings.length ? `<div class="alert warn small"><b>Points à vérifier</b><ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}
-    ${doc.extracted ? `<details class="peek-details" open><summary>Ce que l'IA a lu</summary>${extractedDetails(doc.extracted)}</details>` : ''}
-    ${entries.length ? `<details class="peek-details" open><summary>Écritures (${entries.length})</summary>${entriesHtml}</details>` : ''}
-    ${doc.company_id !== state.companyId
-      ? '<button class="peek-edit" data-peek="swap">✎ Modifier ce document : l\'ouvrir à gauche <span class="muted small">(les deux côtés s\'échangent)</span></button>'
-      : `<a class="btn peek-edit" href="#/documents/${doc.id}">✎ Ouvrir ce document à gauche pour le modifier</a>`}
-  </div>`;
-}
-
-// « Échanger » : le dossier de droite devient le dossier de travail et celui de
-// gauche passe à droite (avec le document qui y était ouvert).
+// « Échanger » : le dossier de droite passe à gauche (sur la même page) et
+// celui de gauche passe à droite.
 function swapPeek() {
   const c = peekCompany();
   if (!c) return;
-  const [page, arg] = location.hash.replace(/^#\/?/, '').split('/');
-  const leftDoc = page === 'documents' && arg ? Number(arg) : null;
   const leftCompany = state.companyId;
-  const target = peek.docId ? `#/documents/${peek.docId}` : '#/documents';
+  const leftPage = safePage(location.hash);
+  const target = peek.page;
   state.companyId = c.id;
   store('ec_company', String(c.id));
   setPeekCompany(state.companies.some((x) => x.id === leftCompany) ? leftCompany : null);
-  peek.docId = leftDoc;
+  peek.page = leftPage;
   savePeek();
   if (location.hash === target) route(); else location.hash = target;
   renderPeek();
@@ -983,10 +898,10 @@ function bindPeek(panel) {
     if (a === 'close') closePeek();
     else if (a === 'min') minimizePeek();
     else if (a === 'swap') swapPeek();
-    else if (a === 'clients') { setPeekCompany(null); savePeek(); renderPeek().then(() => panel.querySelector('#peek-q')?.focus()); }
-    else if (a === 'list') { peek.docId = null; savePeek(); renderPeek(); }
-    else if (a === 'refresh') { peek.docs = null; renderPeek(); }
+    else if (a === 'reload') panel.querySelector('#peek-frame')?.contentWindow.location.reload();
+    else if (a === 'clients') { setPeekCompany(null); savePeek(); renderPeek(); panel.querySelector('#peek-q')?.focus(); }
   }));
+  // Choix du client.
   const pickClient = (id) => { setPeekCompany(id); savePeek(); syncPeek(); renderPeek(); };
   const bindClients = () => panel.querySelectorAll('[data-pc]').forEach((b) => b.addEventListener('click', () => pickClient(Number(b.dataset.pc))));
   bindClients();
@@ -995,32 +910,29 @@ function bindPeek(panel) {
   q?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); const first = panel.querySelector('[data-pc]'); if (first) pickClient(Number(first.dataset.pc)); }
   });
-  const bindDocs = () => panel.querySelectorAll('[data-pd]').forEach((b) => b.addEventListener('click', () => {
-    if (!b.dataset.pd) return;
-    peek.docId = Number(b.dataset.pd);
-    savePeek();
-    renderPeek().then(() => panel.querySelector('.peek-body')?.scrollTo({ top: 0 }));
-  }));
-  bindDocs();
-  const dq = panel.querySelector('#peek-dq');
-  dq?.addEventListener('input', () => { peek.q = dq.value; panel.querySelector('#peek-docs').innerHTML = peekDocItems(); bindDocs(); });
-  dq?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); panel.querySelector('#peek-docs [data-pd]')?.click(); }
-  });
-  panel.querySelectorAll('[data-ps]').forEach((b) => b.addEventListener('click', () => { peek.status = b.dataset.ps; savePeek(); renderPeek(); }));
-  const setZoom = (z) => {
-    peek.zoom = Math.max(1, Math.min(3, z));
-    savePeek();
-    const view = panel.querySelector('.peek-doc-view');
-    view?.style.setProperty('--zoom', peek.zoom);
-    view?.classList.toggle('zoomed', peek.zoom > 1);
-    const label = panel.querySelector('.peek-zoom .muted');
-    if (label) label.textContent = `${Math.round(peek.zoom * 100)} %`;
-    panel.querySelector('[data-zoom="-1"]')?.toggleAttribute('disabled', peek.zoom <= 1);
-    panel.querySelector('[data-zoom="1"]')?.toggleAttribute('disabled', peek.zoom >= 3);
+  // Onglets : on change la page du cadre sans le recharger.
+  const frame = panel.querySelector('#peek-frame');
+  const markTab = () => {
+    const key = pageKey(peek.page);
+    panel.querySelectorAll('[data-tab]').forEach((t) => t.classList.toggle('active', t.dataset.tab === key));
+    panel.querySelector('.peek-tabs .active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   };
-  panel.querySelectorAll('[data-zoom]').forEach((b) => b.addEventListener('click', () => setZoom(peek.zoom + Number(b.dataset.zoom) * 0.5)));
-  panel.querySelectorAll('[data-zoomable]').forEach((img) => img.addEventListener('click', () => setZoom(peek.zoom > 1 ? 1 : 2)));
+  panel.querySelectorAll('[data-tab]').forEach((t) => t.addEventListener('click', () => {
+    peek.page = `#/${t.dataset.tab}`;
+    savePeek();
+    markTab();
+    try { frame.contentWindow.location.replace(`/?embed=1&company=${peek.companyId}${peek.page}`); } catch { renderPeek(); }
+  }));
+  // La page affichée à droite (lien vers un document, un compte…) est retenue.
+  frame?.addEventListener('load', () => {
+    panel.querySelector('.peek-loading')?.remove();
+    try {
+      const w = frame.contentWindow;
+      const onHash = () => { peek.page = safePage(w.location.hash); savePeek(); markTab(); };
+      w.addEventListener('hashchange', onHash);
+      onHash();
+    } catch { /* cadre non accessible */ }
+  });
   // Poignée de redimensionnement (bord gauche du panneau).
   const handle = panel.querySelector('.peek-resize');
   handle.addEventListener('pointerdown', (e) => {
@@ -2127,7 +2039,7 @@ async function viewClients() {
         <div class="small muted">${sinceText(c.last_document)} · ${c.client_users ? `👤 ${c.client_users} accès client` : 'Client pas encore invité'}</div>
         <div class="row" style="margin-top:12px">
           <button class="primary small" data-open="${c.id}">Ouvrir le dossier</button>
-          <button class="small" data-side="${c.id}" title="Voir ses documents à côté du dossier ouvert">⧉ À côté</button>
+          <button class="small" data-side="${c.id}" title="Ouvrir ce dossier à droite, à côté du dossier actuel">⧉ À côté</button>
           <button class="small" data-invite="${c.id}">👤 Accès client</button>
           <button class="ghost small" data-edit="${c.id}" title="Modifier">✎</button>
         </div>

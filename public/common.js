@@ -212,7 +212,9 @@ function highlight(text, q) {
  * @param {{source: () => {value:string,label:string,hint?:string}[], onPick?: (item) => void, minChars?: number, fill?: 'value'|'label'}} opts
  */
 // emptyList : nombre d'éléments proposés quand le champ est vide (au clic), 0 = aucun.
-export function autocomplete(input, { source, onPick, minChars = 2, fill = 'value', emptyList = 0, clearOnPick = false }) {
+// secondary : action en plus sur chaque suggestion (bouton à droite, ou Maj + Entrée),
+// par exemple { label, title, show: () => bool, onPick: (item) => void }.
+export function autocomplete(input, { source, onPick, minChars = 2, fill = 'value', emptyList = 0, clearOnPick = false, secondary = null }) {
   if (input.dataset.acBound) return;
   input.dataset.acBound = '1';
   input.setAttribute('autocomplete', 'off');
@@ -236,6 +238,11 @@ export function autocomplete(input, { source, onPick, minChars = 2, fill = 'valu
     input.dispatchEvent(new Event('change', { bubbles: true }));
     onPick?.(it);
   };
+  const pickSecondary = (it) => {
+    if (clearOnPick) input.value = '';
+    close();
+    secondary.onPick(it);
+  };
   const render = () => {
     const q = input.value;
     if (!q.trim() && emptyList && document.activeElement === input) items = (source() || []).slice(0, emptyList);
@@ -250,9 +257,11 @@ export function autocomplete(input, { source, onPick, minChars = 2, fill = 'valu
       input.setAttribute('aria-expanded', 'true');
     }
     active = Math.min(active, items.length - 1);
-    box.innerHTML = items.map((it, i) => `<div class="ac-item ${i === active ? 'active' : ''}" role="option" data-i="${i}">
-      <span class="ac-code">${highlight(it.value, q)}</span><span class="ac-label">${highlight(it.label, q)}</span>${it.hint ? `<span class="ac-hint">${esc(it.hint)}</span>` : ''}</div>`).join('');
+    const sec = secondary && (!secondary.show || secondary.show());
+    box.innerHTML = items.map((it, i) => `<div class="ac-item ${sec ? 'has-action' : ''} ${i === active ? 'active' : ''}" role="option" data-i="${i}">
+      <span class="ac-code">${highlight(it.value, q)}</span><span class="ac-label">${highlight(it.label, q)}</span>${it.hint ? `<span class="ac-hint">${esc(it.hint)}</span>` : ''}${sec ? `<button type="button" class="ac-action" tabindex="-1" title="${esc(secondary.title || '')}">${esc(secondary.label)}</button>` : ''}</div>`).join('');
     box.querySelectorAll('.ac-item').forEach((el) => el.addEventListener('mousedown', (e) => { e.preventDefault(); pick(items[Number(el.dataset.i)]); }));
+    box.querySelectorAll('.ac-action').forEach((b) => b.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); pickSecondary(items[Number(b.closest('.ac-item').dataset.i)]); }));
     place();
   };
   input.addEventListener('input', (e) => { if (e.isTrusted) { active = -1; render(); } });
@@ -263,6 +272,7 @@ export function autocomplete(input, { source, onPick, minChars = 2, fill = 'valu
     if (!box) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); active = (active + 1) % items.length; render(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); active = (active - 1 + items.length) % items.length; render(); }
+    else if (e.key === 'Enter' && e.shiftKey && secondary && (!secondary.show || secondary.show())) { e.preventDefault(); pickSecondary(items[Math.max(active, 0)]); }
     else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); pick(items[active]); }
     else if (e.key === 'Escape') close();
   });
