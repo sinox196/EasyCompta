@@ -30,6 +30,7 @@ On scanne une facture, un ticket ou un relevé bancaire avec le téléphone. L'I
   - le **client** : il envoie ses documents (site ou téléphone) et suit leur traitement, sans voir la comptabilité ni les autres dossiers ;
   - un **collaborateur** du cabinet : accès complet au dossier.
   Les droits sont vérifiés côté serveur (`src/auth.js`, `src/routes/members.js`).
+- **Écran partagé (deux dossiers en même temps)** : sans quitter le dossier sur lequel on travaille, le bouton « ⧉ Voir un autre dossier à côté » (barre latérale), « ⧉ Comparer à côté » (page d'un document) ou « ⧉ À côté » (Mes clients) ouvre à droite les documents d'un autre client, ou un autre document du même client. On y cherche un document, on le parcourt (‹ ›), on zoome sur les pages et on voit ce que l'IA a lu et les écritures, en lecture seule. « ⇄ Échanger » fait passer ce dossier à gauche pour le modifier. Le panneau se redimensionne à la souris (double-clic : moitié-moitié), se réduit en pastille et reste ouvert d'une page à l'autre et après un rechargement. Sur téléphone, il s'affiche par-dessus la page.
 - **Envoi de nombreux documents à la fois** : sur le site, par lots, avec un résultat par fichier ; sur le téléphone, plusieurs documents de plusieurs pages chacun, envoyés d'un coup.
 - Une page **« Comment ça marche ? »** explique la comptabilité aux non-comptables.
 
